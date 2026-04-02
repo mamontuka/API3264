@@ -1,0 +1,1 @@
+in this folder must be real browser profile, this file just placeholder, can be deleted
