@@ -1,4 +1,4 @@
-Openwebui environment :
+### Openwebui environment :
 
     # AI System Environment Configuration
     #ENABLE_PERSISTENT_CONFIG=True
@@ -19,4 +19,4 @@ Openwebui environment :
     ENABLE_FORWARD_USER_INFO_HEADERS="True"
     CUSTOM_HEADERS="X-Chat-ID:${CHAT_ID}"
 
-env.example - copy to file named .env and adjust settings
+### env.example - copy to file named .env and adjust settings
