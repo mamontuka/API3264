@@ -1,5 +1,5 @@
 # Copyright (C) 2026
-# 
+#
 # Authors:
 #
 # Oleh Mamont - https://github.com/mamontuka
@@ -152,7 +152,7 @@ async def get_or_create_qwen_chat(token_obj, openweb_chat_id: str, model: str):
         }
         save_chat_state()
         logger.info(f"Created and saved chat: {openweb_chat_id} -> {qwen_chat_id}")
-        
+
         # 🔥 FIX: Small delay to allow Qwen to fully initialize the new chat
         # This prevents 400 errors on the first message to a new chat
         await asyncio.sleep(0.5)
@@ -507,20 +507,20 @@ def _generate_openweb_chat_id(request: Request, body: Dict[str, Any], model: str
         if body.get(field):
             logger.debug(f"🔍 Using explicit {field}: {body[field][:8]}...")
             return str(body[field])
-    
+
     # Check headers
     for header in ["x-chat-id", "x-conversation-id", "openwebui-chat-id", "x-openwebui-chat-id"]:
         if request.headers.get(header):
             logger.debug(f"🔍 Using header {header}: {request.headers[header][:8]}...")
             return str(request.headers[header])
-    
+
     # Check nested fields
     for parent_key, child_key in Config.get_nested_chat_id_paths():
         parent = body.get(parent_key)
         if isinstance(parent, dict) and parent.get(child_key):
             logger.debug(f"🔍 Using nested {parent_key}.{child_key}: {parent[child_key][:8]}...")
             return str(parent[child_key])
-    
+
     # 🔥 2. Try to get ID from OpenWebUI DB (table 'chat')
     user_id = request.headers.get(Config.OPENWEBUI_USER_ID_HEADER)
     if user_id and Config.OPENWEBUI_DB_ENABLED:
@@ -528,7 +528,7 @@ def _generate_openweb_chat_id(request: Request, body: Dict[str, Any], model: str
         if db_chat_id:
             logger.debug(f"🗄 Using chat_id from DB: {db_chat_id[:8]}...")
             return db_chat_id
-    
+
     # 🔥 3. STABLE hash for dialogue continuation (DEFAULT BEHAVIOR)
     # This ensures that messages from the same user within an hour continue in the same chat
     if user_id:
@@ -537,7 +537,7 @@ def _generate_openweb_chat_id(request: Request, body: Dict[str, Any], model: str
         stable_id = hashlib.sha256(stable_key.encode()).hexdigest()[:32]
         logger.debug(f"🔁 Using stable chat_id: {stable_id[:8]}... (user={user_id[:8]}, model={model}, hour={hour_bucket})")
         return stable_id
-    
+
     # 🔥 4. Last fallback: random UUID (only if no user_id available)
     fallback_id = str(uuid.uuid4())
     logger.debug(f"⚠️ Fallback to random UUID: {fallback_id[:8]}... (no user_id)")
@@ -762,7 +762,8 @@ async def _stream_openai_response(token_info, chat_id: str, payload: Dict[str, A
                 continue
 
             has_streamed_chunks = True
-            yield " " + json.dumps({
+            # 🔥 FIX: Правильный SSE-формат: "data: " + JSON + "\n\n"
+            yield "data: " + json.dumps({
                 "id": "chatcmpl-stream",
                 "object": "chat.completion.chunk",
                 "created": int(time.time()),
@@ -774,7 +775,7 @@ async def _stream_openai_response(token_info, chat_id: str, payload: Dict[str, A
         if not result.get("success"):
             if not has_streamed_chunks:
                 err_text = f"Error: {result.get('error', 'Qwen API Error')}"
-                yield " " + json.dumps({
+                yield "data: " + json.dumps({
                     "id": "chatcmpl-stream",
                     "object": "chat.completion.chunk",
                     "created": int(time.time()),
@@ -782,7 +783,7 @@ async def _stream_openai_response(token_info, chat_id: str, payload: Dict[str, A
                     "choices": [{"index": 0, "delta": {"content": err_text}, "finish_reason": None}]
                 }, ensure_ascii=False) + "\n\n"
         elif not has_streamed_chunks and result.get("content"):
-            yield " " + json.dumps({
+            yield "data: " + json.dumps({
                 "id": "chatcmpl-stream",
                 "object": "chat.completion.chunk",
                 "created": int(time.time()),
@@ -795,14 +796,17 @@ async def _stream_openai_response(token_info, chat_id: str, payload: Dict[str, A
             update_chat_parent_id(openweb_chat_id, response_id)
             logger.debug(f"Updated last_parent_id for {openweb_chat_id[:8]}...: {response_id[:8]}...")
 
-        yield " " + json.dumps({
+        # 🔥 FIX: Правильный финальный чанк с "data: "
+        yield "data: " + json.dumps({
             "id": "chatcmpl-stream",
             "object": "chat.completion.chunk",
             "created": int(time.time()),
             "model": model,
             "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]
         }, ensure_ascii=False) + "\n\n"
-        yield " [DONE]\n\n"
+
+        # 🔥 FIX: [DONE] тоже с префиксом "data: "
+        yield "data: [DONE]\n\n"
 
     finally:
         if not task.done():
@@ -871,10 +875,10 @@ async def handle_chat_completions(request: Request, body: Dict[str, Any]):
     # Qwen API v2 requires parent_id=None for continuing dialogue
     # Otherwise returns 400 Bad Request
     effective_parent_id = None
-    
+
     # Check if chat already exists in our state
     chat_exists = openweb_chat_id in CHAT_STATE
-    
+
     if chat_exists:
         # ✅ Chat already exists → DO NOT send parent_id
         # Qwen builds linear history inside chat_id automatically
@@ -892,7 +896,7 @@ async def handle_chat_completions(request: Request, body: Dict[str, Any]):
             effective_parent_id = None
             if Config.DEBUG_LOGGING:
                 logger.debug(f"📌 New chat → parent_id=None")
-    
+
     if Config.DEBUG_LOGGING:
         logger.debug(f"🎯 Final parent_id={effective_parent_id[:8] if effective_parent_id else None}... (chat_id={qwen_chat_id[:8] if qwen_chat_id else None}...)")
     # =================================================================
