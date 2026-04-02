@@ -18,3 +18,5 @@ Openwebui environment :
     ENABLE_WEBSOCKET_SUPPORT="True"
     ENABLE_FORWARD_USER_INFO_HEADERS="True"
     CUSTOM_HEADERS="X-Chat-ID:${CHAT_ID}"
+
+env.example - copy to file named .env and adjust settings
