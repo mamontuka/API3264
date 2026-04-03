@@ -1,5 +1,5 @@
 # Copyright (C) 2026
-# 
+#
 # Authors:
 #
 # Production-grade version by Oleh Mamont - https://github.com/mamontuka
@@ -1463,35 +1463,37 @@ async def handle_chat_completions(request: Request, body: Dict[str, Any]):
         return JSONResponse(status_code=500, content={"error": "Failed to get or create chat in Qwen"})
 
     # =================================================================
-    # 🔥 FIX FOR QWEN API V2: parent_id handling
+    # 🔥 FIX: ГИБКАЯ ОБРАБОТКА parent_id (модель-специфичная, настраиваемая через config/.env)
     # =================================================================
-    # Qwen API v2 requires parent_id=None for continuing dialogue
-    # Otherwise returns 400 Bad Request
-    effective_parent_id = None
 
-    # Check if chat already exists in our state
+    effective_parent_id = None
     chat_exists = openweb_chat_id in CHAT_STATE
 
     if chat_exists:
-        # ✅ Chat already exists → DO NOT send parent_id
-        # Qwen builds linear history inside chat_id automatically
-        effective_parent_id = None
-        if Config.DEBUG_LOGGING:
-            logger.debug(f"📌 Continuing chat {openweb_chat_id[:8]}... → parent_id=None")
-    else:
-        # ⚠️ New chat → can send parent_id if client explicitly provided it
-        # But for compatibility, better to use None
-        if incoming_parent_id and Config.OPENWEBUI_CHAT_ID_MODE == "per_request":
-            effective_parent_id = incoming_parent_id
+        stored = CHAT_STATE[openweb_chat_id]
+
+        # 🔥 Логика выбора parent_id в зависимости от модели (из Config)
+        if mapped_model in Config.MODELS_REQUIRING_PARENT_ID:
+            # Эти модели требуют parent_id для продолжения диалога
+            effective_parent_id = stored.get("last_parent_id")
             if Config.DEBUG_LOGGING:
-                logger.debug(f"📌 New chat with explicit parent_id: {effective_parent_id[:8]}...")
-        else:
+                logger.debug(f"📌 Model {mapped_model} REQUIRES parent_id: {effective_parent_id[:8] if effective_parent_id else None}")
+        elif mapped_model in Config.MODELS_WORKING_WITHOUT_PARENT_ID:
+            # Эти модели строят историю внутри chat_id автоматически
             effective_parent_id = None
             if Config.DEBUG_LOGGING:
-                logger.debug(f"📌 New chat → parent_id=None")
+                logger.debug(f"📌 Model {mapped_model} works WITHOUT parent_id (auto-history)")
+        else:
+            # Неизвестная модель: пробуем с parent_id (более безопасный дефолт)
+            effective_parent_id = stored.get("last_parent_id")
+            if Config.DEBUG_LOGGING:
+                logger.debug(f"📌 Model {mapped_model} UNKNOWN: trying WITH parent_id (safe default)")
+    else:
+        # Новый чат: всегда parent_id=None для первого сообщения
+        effective_parent_id = None
 
     if Config.DEBUG_LOGGING:
-        logger.debug(f"🎯 Final parent_id={effective_parent_id[:8] if effective_parent_id else None}... (chat_id={qwen_chat_id[:8] if qwen_chat_id else None}...)")
+        logger.debug(f"🎯 Final: model={mapped_model}, parent_id={effective_parent_id[:8] if effective_parent_id else None}, chat_id={qwen_chat_id[:8] if qwen_chat_id else None}")
     # =================================================================
 
     # Build final payload for Qwen API
@@ -1722,4 +1724,3 @@ if __name__ == "__main__":
         uvicorn.run("qwenapi:app", host=args.host, port=args.port, reload=args.reload)
     else:
         print("No action specified. Use --help for usage.")
-
