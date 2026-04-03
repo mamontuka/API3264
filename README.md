@@ -26,5 +26,6 @@
     AIOHTTP_CLIENT_SOCK_TIMEOUT=600
     ENABLE_STREAMING=true
     STREAMING_TIMEOUT=900
+    WEBSOCKET_REDIS_LOCK_TIMEOUT=600
 
 ### env.example - copy to file named .env and adjust settings
