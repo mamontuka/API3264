@@ -2,7 +2,9 @@
 # 
 # Authors:
 #
-# Oleh Mamont - https://github.com/mamontuka
+# Production-grade version by Oleh Mamont - https://github.com/mamontuka
+#
+# Based on:
 # y13sint - https://github.com/y13sint
 # raz0r-code - https://github.com/raz0r-code
 #
@@ -94,7 +96,7 @@ class Config:
     CHROME_USER_DATA: str = os.getenv("CHROME_USER_DATA", str(SCRIPT_DIR / "profile"))
 
     # 🔥 HTTP client settings
-    HTTP_TIMEOUT: float = float(os.getenv("HTTP_TIMEOUT", "120.0"))
+    HTTP_TIMEOUT: float = float(os.getenv("HTTP_TIMEOUT", "900.0"))
     HTTP_FOLLOW_REDIRECTS: bool = os.getenv("HTTP_FOLLOW_REDIRECTS", "true").lower() in ("true", "1", "yes", "on")
 
     # 🔥 Default headers for Qwen API requests
