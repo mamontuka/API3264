@@ -155,7 +155,7 @@ async def get_or_create_qwen_chat(token_obj, openweb_chat_id: str, model: str):
 
         # 🔥 FIX: Small delay to allow Qwen to fully initialize the new chat
         # This prevents 400 errors on the first message to a new chat
-        await asyncio.sleep(0.5)
+        await asyncio.sleep(2.0)
 
     return qwen_chat_id
 
