@@ -1,8 +1,10 @@
 # Copyright (C) 2026
-#
+# 
 # Authors:
 #
-# Oleh Mamont - https://github.com/mamontuka
+# Production-grade version by Oleh Mamont - https://github.com/mamontuka
+#
+# Based on:
 # y13sint - https://github.com/y13sint
 # raz0r-code - https://github.com/raz0r-code
 #
