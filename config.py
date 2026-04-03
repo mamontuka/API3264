@@ -1,5 +1,5 @@
 # Copyright (C) 2026
-# 
+#
 # Authors:
 #
 # Production-grade version by Oleh Mamont - https://github.com/mamontuka
@@ -71,6 +71,26 @@ class Config:
         "qwq": "qwq-32b",
         "qvq": "qvq-72b-preview-0310",
     }
+
+    # =================================================================
+    # MODEL PARENT_ID BEHAVIOR CONFIGURATION
+    # =================================================================
+    # Models that REQUIRE explicit parent_id for linear conversation history
+    # (without parent_id they create "regeneration branches" instead of continuing dialogue)
+    MODELS_REQUIRING_PARENT_ID = os.getenv(
+        "QWEN_MODELS_REQUIRING_PARENT_ID",
+        "qwen-max-latest,qwen3-max,qwen-plus,qwen-plus-2025-09-11,qwen-plus-2025-01-25,qwen3-coder-plus,qwen3-vl-plus,qwen3-omni-flash,qwen3-omni-flash-2025-12-01"
+    ).split(",")
+
+    # Models that work correctly WITH parent_id=None (auto-build history inside chat_id)
+    MODELS_WORKING_WITHOUT_PARENT_ID = os.getenv(
+        "QWEN_MODELS_WITHOUT_PARENT_ID",
+        "qwen3.5-plus,qwen3.5-flash,qwen3.5-397b-a17b,qwen3.5-122b-a10b,qwen3.5-27b,qwen3.5-35b-a3b,qwen-turbo,qwen-turbo-2025-02-11,qwq-32b,qwen3-235b-a22b,qwen3-30b-a3b,qwen3-coder-30b-a3b-instruct,qwen2.5-omni-7b,qvq-72b-preview-0310,qwen2.5-vl-32b-instruct,qwen2.5-14b-instruct-1m,qwen2.5-coder-32b-instruct,qwen2.5-72b-instruct"
+    ).split(",")
+
+    # Strip whitespace from model names (in case of spaces in env)
+    MODELS_REQUIRING_PARENT_ID = [m.strip() for m in MODELS_REQUIRING_PARENT_ID if m.strip()]
+    MODELS_WORKING_WITHOUT_PARENT_ID = [m.strip() for m in MODELS_WORKING_WITHOUT_PARENT_ID if m.strip()]
 
     # 🔥 Logging configuration
     DEBUG_LOGGING: bool = os.getenv("DEBUG_LOGGING", "false").lower() in ("true", "1", "yes", "on")
@@ -185,7 +205,7 @@ _pg_connection_cache: Dict[str, Any] = {}
 def get_pg_connection() -> Optional[Any]:
     """
     Get cached PostgreSQL connection for OpenWebUI database.
-    
+
     🔥 FIX: Automatically recovers from aborted transactions by calling rollback().
     This prevents "current transaction is aborted" errors.
     """
@@ -204,7 +224,7 @@ def get_pg_connection() -> Optional[Any]:
     # Check cache
     if cache_key in _pg_connection_cache:
         conn = _pg_connection_cache[cache_key]
-        
+
         # Check if connection is still alive
         if conn.closed != 0:
             # Connection is closed, remove from cache
