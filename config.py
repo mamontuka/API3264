@@ -63,6 +63,7 @@ class Config:
     # 🔥 Default model and mapping
     DEFAULT_MODEL: str = os.getenv("DEFAULT_MODEL", "qwen-max-latest")
     MODEL_MAPPING: Dict[str, str] = {
+        "qwen3.6": "qwen3.6-plus",
         "qwen3.5": "qwen3.5-plus",
         "qwen-max": "qwen3-max",
         "qwen-vl": "qwen3-vl-plus",
@@ -79,13 +80,13 @@ class Config:
     # (without parent_id they create "regeneration branches" instead of continuing dialogue)
     MODELS_REQUIRING_PARENT_ID = os.getenv(
         "QWEN_MODELS_REQUIRING_PARENT_ID",
-        "qwen-max-latest,qwen3-max,qwen-plus,qwen-plus-2025-09-11,qwen-plus-2025-01-25,qwen3-coder-plus,qwen3-vl-plus,qwen3-omni-flash,qwen3-omni-flash-2025-12-01"
+        "qwen3.6-plus,qwen3.5-plus,qwen3.5-flash,qwen-max-latest,qwen3-max,qwen-plus,qwen-plus-2025-09-11,qwen-plus-2025-01-25,qwen3-coder-plus,qwen3-vl-plus,qwen3-omni-flash,qwen3-omni-flash-2025-12-01"
     ).split(",")
 
     # Models that work correctly WITH parent_id=None (auto-build history inside chat_id)
     MODELS_WORKING_WITHOUT_PARENT_ID = os.getenv(
         "QWEN_MODELS_WITHOUT_PARENT_ID",
-        "qwen3.5-plus,qwen3.5-flash,qwen3.5-397b-a17b,qwen3.5-122b-a10b,qwen3.5-27b,qwen3.5-35b-a3b,qwen-turbo,qwen-turbo-2025-02-11,qwq-32b,qwen3-235b-a22b,qwen3-30b-a3b,qwen3-coder-30b-a3b-instruct,qwen2.5-omni-7b,qvq-72b-preview-0310,qwen2.5-vl-32b-instruct,qwen2.5-14b-instruct-1m,qwen2.5-coder-32b-instruct,qwen2.5-72b-instruct"
+        "qwen3.5-397b-a17b,qwen3.5-122b-a10b,qwen3.5-27b,qwen3.5-35b-a3b,qwen-turbo,qwen-turbo-2025-02-11,qwq-32b,qwen3-235b-a22b,qwen3-30b-a3b,qwen3-coder-30b-a3b-instruct,qwen2.5-omni-7b,qvq-72b-preview-0310,qwen2.5-vl-32b-instruct,qwen2.5-14b-instruct-1m,qwen2.5-coder-32b-instruct,qwen2.5-72b-instruct"
     ).split(",")
 
     # Strip whitespace from model names (in case of spaces in env)
