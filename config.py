@@ -65,7 +65,7 @@ class Config:
     MODEL_MAPPING: Dict[str, str] = {
         "qwen3.6": "qwen3.6-plus",
         "qwen3.5": "qwen3.5-plus",
-        "qwen-max": "qwen3-max",
+        "qwen-max-latest": "qwen3-max",
         "qwen-vl": "qwen3-vl-plus",
         "qwen-coder": "qwen3-coder-plus",
         "qwen3": "qwen3-235b-a22b",
