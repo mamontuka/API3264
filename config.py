@@ -66,11 +66,10 @@ class Config:
         "qwen3.6": "qwen3.6-plus",
         "qwen3.5": "qwen3.5-plus",
         "qwen-max-latest": "qwen3-max",
-        "qwen-vl": "qwen3-vl-plus",
-        "qwen-coder": "qwen3-coder-plus",
+        "qwen-vl": "qwen3-vl-235b-a22b",
+        "qwen3-coder-plus": "qwen3-coder",
         "qwen3": "qwen3-235b-a22b",
-        "qwq": "qwq-32b",
-        "qvq": "qvq-72b-preview-0310",
+        "qwen2": "qwen2.5-max",
     }
 
     # =================================================================
