@@ -79,7 +79,29 @@ class Config:
     # (without parent_id they create "regeneration branches" instead of continuing dialogue)
     MODELS_REQUIRING_PARENT_ID = os.getenv(
         "QWEN_MODELS_REQUIRING_PARENT_ID",
-        "qwen3.6-plus,qwen3.6-plus-preview,qwen3.5-plus,qwen3.5-flash,qwen3.5-omni-flash,qwen3.5-omni-plus,qwen3.5-max-2026-03-08,qwen3.5-max-preview,qwen3.5-27b,qwen3.5-35b-a3b,qwen3.5-122b-a10b,qwen3.5-397b-a17b,qwen3-omni-flash-2025-12-01,qwen3-vl-plus,qwen3-coder-plus,qwen3-max-2026-01-23,qwen3-max,qwen-plus-2025-07-28,qwen3-235b-a22b-2507,qwen3-vl-235b-a22b,qwen2.5-max"
+        (
+            "qwen3.6-plus,"
+            "qwen3.6-plus-preview,"
+            "qwen3.5-plus,"
+            "qwen3.5-flash,"
+            "qwen3.5-omni-flash,"
+            "qwen3.5-omni-plus,"
+            "qwen3.5-max-2026-03-08,"
+            "qwen3.5-max-preview,"
+            "qwen3.5-27b,"
+            "qwen3.5-35b-a3b,"
+            "qwen3.5-122b-a10b,"
+            "qwen3.5-397b-a17b,"
+            "qwen3-omni-flash-2025-12-01,"
+            "qwen3-vl-plus,"
+            "qwen3-coder-plus,"
+            "qwen3-max-2026-01-23,"
+            "qwen3-max,"
+            "qwen-plus-2025-07-28,"
+            "qwen3-235b-a22b-2507,"
+            "qwen3-vl-235b-a22b,"
+            "qwen2.5-max"
+        )
     ).split(",")
 
     # Models that work correctly WITH parent_id=None (auto-build history inside chat_id)
