@@ -1,5 +1,5 @@
 # Copyright (C) 2026
-# 
+#
 # Authors:
 #
 # Production-grade version by Oleh Mamont - https://github.com/mamontuka
@@ -50,7 +50,11 @@ python-dotenv>=1.0.0,<2.0.0
 # =================================================================
 
 # 🔥 PostgreSQL support for OpenWebUI integration
- psycopg2-binary>=2.9.9,<3.0.0
+# psycopg2-binary>=2.9.9,<3.0.0
+
+# 🔥 ASYNC DATABASE DRIVER (replaces psycopg2)
+# Native async driver for PostgreSQL - no Event Loop blocking
+asyncpg>=0.29.0
 
 # 🔥 Additional async utilities
  aiosqlite>=0.19.0,<1.0.0
