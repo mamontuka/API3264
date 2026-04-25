@@ -59,6 +59,7 @@ class Config:
     DEFAULT_MODEL: str = os.getenv("DEFAULT_MODEL", "qwen-max-latest")
     MODEL_MAPPING: Dict[str, str] = {
         "qwen3.6": "qwen3.6-plus",
+        "qwen3.6-max": "qwen3.6-max-preview",
         "qwen3.5": "qwen3.5-plus",
         "qwen3.5-max": "qwen3.5-max-2026-03-08",
         "qwen-max-latest": "qwen3-max",
@@ -77,6 +78,7 @@ class Config:
         (
             "qwen3.6-plus,"
             "qwen3.6-plus-preview,"
+            "qwen3.6-max-preview,"
             "qwen3.5-plus,"
             "qwen3.5-flash,"
             "qwen3.5-omni-flash,"
