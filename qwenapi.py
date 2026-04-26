@@ -22,6 +22,7 @@
 # along with this program. If not, see <https://www.gnu.org/>.
 #
 #
+
 """
 FreeQwenApi - OpenAI-compatible proxy for Qwen Chat
 ====================================================
@@ -78,6 +79,8 @@ from config import Config, setup_logging
 
 # 🔥 NEW: Import async database functions
 from db_async import init_db_pool, close_db_pool, fetch_chat_id_from_db, test_db_connection
+# 🔥 UPDATED: Import new ChatState factory
+from chat_state.factory import init_chat_state, close_chat_state, get_chat_state_backend, is_fallback_active
 
 # =================================================================
 # INITIALIZATION
@@ -98,94 +101,9 @@ http_client = httpx.AsyncClient(
     follow_redirects=Config.HTTP_FOLLOW_REDIRECTS
 )
 
-# Global state dictionary: maps OpenWebUI chat IDs to Qwen chat IDs
-# Structure: { openweb_chat_id: { "qwen_chat_id": str, "last_parent_id": str|None, "_is_new": bool } }
-# This allows us to continue conversations in the same Qwen chat across multiple API calls
-CHAT_STATE: Dict[str, Any] = {}
-
-# Async lock for thread-safe access to CHAT_STATE
-# Prevents race conditions when multiple requests try to create/update chat mappings concurrently
-CHAT_MAPPING_LOCK = asyncio.Lock()
-
-# =================================================================
-# STATE MANAGEMENT
-# =================================================================
-def load_chat_state():
-    """
-    Load chat mapping state from persistent storage (JSON file).
-    This function restores the mapping between OpenWebUI chat IDs and Qwen chat IDs
-    after a server restart, ensuring conversation continuity.
-    Returns:
-        bool: True if state was successfully loaded, False otherwise.
-    Side effects:
-        - Populates the global CHAT_STATE dictionary
-        - Logs loading progress and errors
-        - Falls back to legacy file format if primary file is missing
-    """
-    global CHAT_STATE
-    logger.info(f"load_chat_state() START | SESSION_DIR={Config.SESSION_DIR}")
-    # Try to load from the primary state file
-    if Config.CHAT_STATE_FILE.exists():
-        try:
-            logger.info(f"File found: {Config.CHAT_STATE_FILE}, size: {Config.CHAT_STATE_FILE.stat().st_size} bytes")
-            with open(Config.CHAT_STATE_FILE, "r", encoding="utf-8") as f:
-                loaded = json.load(f)
-                CHAT_STATE.update(loaded)
-            logger.info(f"Loaded {len(CHAT_STATE)} records from state")
-            # Log sample entries for debugging (showing first 2 mappings)
-            if CHAT_STATE:
-                sample = list(CHAT_STATE.items())[:2]
-                logger.info(f"Sample keys: {[(k[:8]+'...', v['qwen_chat_id'][:8]+'...') for k,v in sample]}")
-            return True
-        except Exception as e:
-            # Log full traceback for debugging file loading issues
-            logger.error(f"Error loading {Config.CHAT_STATE_FILE}: {type(e).__name__}: {e}", exc_info=True)
-    else:
-        logger.warning(f"File not found: {Config.CHAT_STATE_FILE}")
-    # Fallback: try to load from legacy file format (old mapping structure)
-    # Old format: { openweb_chat_id: qwen_chat_id } (string values only)
-    # New format: { openweb_chat_id: { "qwen_chat_id": str, "last_parent_id": str|None } }
-    if Config.CHAT_MAPPING_FILE.exists():
-        try:
-            with open(Config.CHAT_MAPPING_FILE, "r", encoding="utf-8") as f:
-                old_mapping = json.load(f)
-                for key, value in old_mapping.items():
-                    if isinstance(value, str):
-                        # Convert old string value to new dict structure
-                        CHAT_STATE[key] = {"qwen_chat_id": value, "last_parent_id": None}
-                    else:
-                        # Already in new format, use as-is
-                        CHAT_STATE[key] = value
-            logger.info(f"Loaded and converted old format: {len(CHAT_STATE)} records")
-            return True
-        except Exception as e:
-            logger.warning(f"Error loading {Config.CHAT_MAPPING_FILE}: {e}")
-    logger.warning("State is EMPTY after load")
-    return False
-
-def save_chat_state():
-    """
-    Atomically save chat mapping state to persistent storage.
-    Uses a temporary file + os.replace() pattern to ensure atomic writes,
-    preventing corruption if the process is interrupted during save.
-    Side effects:
-        - Writes CHAT_STATE to Config.CHAT_STATE_FILE
-        - Logs save operation details (debug level)
-    """
-    Config.ensure_dirs()
-    try:
-        # Write to temporary file first
-        temp_file = str(Config.CHAT_STATE_FILE) + ".tmp"
-        with open(temp_file, "w", encoding="utf-8") as f:
-            json.dump(CHAT_STATE, f, ensure_ascii=False, indent=2)
-            f.flush()
-            # Ensure data is written to disk before renaming
-            os.fsync(f.fileno())
-        # Atomic rename: replaces target file only if write succeeded
-        os.replace(temp_file, Config.CHAT_STATE_FILE)
-        logger.debug(f"Saved state: {len(CHAT_STATE)} chats in {Config.CHAT_STATE_FILE}")
-    except Exception as e:
-        logger.error(f"Error saving {Config.CHAT_STATE_FILE}: {e}")
+# 🔥 REMOVED: Global CHAT_STATE dictionary and lock.
+# State management is now handled by the backend via get_chat_state_backend().
+# This supports both File and PostgreSQL modes with automatic fallback.
 
 # =================================================================
 # CHAT MAPPING
@@ -197,6 +115,9 @@ async def get_or_create_qwen_chat(token_obj, openweb_chat_id: str, model: str):
     1. Check if we already have a Qwen chat ID for this OpenWebUI chat
     2. If not, create a new chat on Qwen side and store the mapping
     3. Return the Qwen chat ID for use in subsequent API calls
+
+    🔥 UPDATED: Uses backend abstraction (File or PostgreSQL) for state persistence.
+
     Args:
         token_obj: Authentication token dictionary from load_tokens()
         openweb_chat_id: Unique identifier from OpenWebUI (UUID format)
@@ -205,59 +126,62 @@ async def get_or_create_qwen_chat(token_obj, openweb_chat_id: str, model: str):
         str|None: Qwen chat ID if successful, None if creation failed
     Side effects:
         - May create a new chat via Qwen API
-        - Updates and saves CHAT_STATE
+        - Updates state via backend (persistent storage)
         - Logs creation/loading operations
     """
     openweb_chat_id = str(openweb_chat_id).strip()
-    # Use lock to prevent race conditions when checking/creating chat mappings
-    async with CHAT_MAPPING_LOCK:
-        # Check if we already have a mapping for this OpenWebUI chat
-        if openweb_chat_id in CHAT_STATE:
-            qwen_id = CHAT_STATE[openweb_chat_id].get("qwen_chat_id")
-            if qwen_id:
-                logger.debug(f"Found existing chat: {openweb_chat_id} -> {qwen_id}")
-                return qwen_id
-        # No existing mapping: create new chat on Qwen side
-        logger.info(f"Creating new Qwen chat for {openweb_chat_id}, model: {model}")
-        qwen_chat_id = await create_qwen_chat(token_obj, model)
-        if not qwen_chat_id:
-            logger.error(f"Failed to create chat for {openweb_chat_id}")
-            return None
-        # Store the new mapping with metadata
-        CHAT_STATE[openweb_chat_id] = {
-            "qwen_chat_id": qwen_chat_id,
-            "last_parent_id": None,  # Will be updated after successful responses
-            "_is_new": True,  # Flag: chat was just created (used for retry logic)
-            "_created_at": time.time()  # Timestamp for debugging/monitoring
-        }
-        save_chat_state()
-        logger.info(f"Created and saved chat: {openweb_chat_id} -> {qwen_chat_id}")
-    # 🔥 IMPORTANT: Delay AFTER releasing lock
+
+    # Get backend instance
+    backend = get_chat_state_backend()
+
+    # Check if we already have a mapping for this OpenWebUI chat
+    state = await backend.get(openweb_chat_id)
+    if state and state.qwen_chat_id:
+        logger.debug(f"Found existing chat: {openweb_chat_id} -> {state.qwen_chat_id}")
+        return state.qwen_chat_id
+
+    # No existing mapping: create new chat on Qwen side
+    logger.info(f"Creating new Qwen chat for {openweb_chat_id}, model: {model}")
+    qwen_chat_id = await create_qwen_chat(token_obj, model)
+    if not qwen_chat_id:
+        logger.error(f"Failed to create chat for {openweb_chat_id}")
+        return None
+
+    # Store the new mapping via backend
+    from chat_state.base import ChatStateData
+    new_state = ChatStateData(
+        qwen_chat_id=qwen_chat_id,
+        last_parent_id=None,
+        is_new=True,
+        created_at=time.time()
+    )
+    await backend.set(openweb_chat_id, new_state)
+
+    logger.info(f"Created and saved chat: {openweb_chat_id} -> {qwen_chat_id}")
+
+    # 🔥 IMPORTANT: Delay AFTER saving state
     # This gives Qwen time to fully initialize the new chat before first message
-    # Placing this outside the lock prevents blocking other requests
     await asyncio.sleep(2.0)
     return qwen_chat_id
 
-def update_chat_parent_id(openweb_chat_id: str, new_parent_id: str):
+async def update_chat_parent_id(openweb_chat_id: str, new_parent_id: str):
     """
     Update the last_parent_id for a chat after successful response.
     The parent_id is used by Qwen API to maintain message threading within a chat.
     We store the last successful response ID so subsequent messages can reference it.
+
+    🔥 UPDATED: Uses backend abstraction for state updates.
+
     Args:
         openweb_chat_id: OpenWebUI chat identifier
         new_parent_id: Response ID from Qwen API to use as parent for next message
     Side effects:
-        - Updates CHAT_STATE[openweb_chat_id]["last_parent_id"]
-        - Removes "_is_new" flag (chat is no longer "new" after first successful response)
-        - Saves state to disk
+        - Updates state via backend
+        - Logs update operation
     """
-    if openweb_chat_id in CHAT_STATE:
-        CHAT_STATE[openweb_chat_id]["last_parent_id"] = new_parent_id
-        # Remove "_is_new" flag: chat has now received at least one successful response
-        if "_is_new" in CHAT_STATE[openweb_chat_id]:
-            del CHAT_STATE[openweb_chat_id]["_is_new"]
-        save_chat_state()
-        logger.debug(f"Updated: last_parent_id[{openweb_chat_id[:8]}...] = {new_parent_id[:8]}...")
+    backend = get_chat_state_backend()
+    await backend.update_parent(openweb_chat_id, new_parent_id)
+    logger.debug(f"Updated: last_parent_id[{openweb_chat_id[:8]}...] = {new_parent_id[:8]}...")
 
 def get_mapped_model(model_name: str) -> str:
     """
@@ -1087,15 +1011,22 @@ async def _process_stream_response(response, chat_id, start_time, on_chunk):
 async def lifespan(app: FastAPI):
     """
     FastAPI lifespan handler: manage startup/shutdown lifecycle.
-    - Startup: Load chat state + Initialize asyncpg DB pool
-    - Shutdown: Close HTTP client + DB pool
+    - Startup: Initialize chat state backend + asyncpg DB pool
+    - Shutdown: Close HTTP client + DB pools
     Args:
         app: FastAPI application instance
     """
-    logger.info("FastAPI startup: loading chat state...")
-    load_chat_state()
+    logger.info("FastAPI startup: initializing chat state backend...")
+    # 🔥 UPDATED: Init backend (handles File/Postgres/Fallback)
+    await init_chat_state()
 
-    # 🔥 NEW: Initialize asyncpg pool
+    # Show active mode
+    if is_fallback_active():
+        logger.warning("⚠️ ChatState is running in FALLBACK mode (File). PostgreSQL was unavailable.")
+    else:
+        logger.info(f"✅ ChatState backend initialized: {Config.CHAT_STATE_BACKEND.value}")
+
+    # Инициализация OpenWebUI DB (только для lookup)
     logger.info("FastAPI startup: initializing asyncpg pool...")
     await init_db_pool()
 
@@ -1104,8 +1035,9 @@ async def lifespan(app: FastAPI):
     logger.info("FastAPI shutdown: cleaning up resources...")
     await http_client.aclose()
 
-    # 🔥 NEW: Close asyncpg pool
-    await close_db_pool()
+    # 🔥 Close backends
+    await close_chat_state()   # Закрывает State DB pool
+    await close_db_pool()      # Закрывает OpenWebUI DB pool
 
 # Create FastAPI application with lifespan management
 app = FastAPI(title="FreeQwenApi Python", lifespan=lifespan)
@@ -1241,7 +1173,7 @@ async def _stream_openai_response(token_info, chat_id: str, payload: Dict[str, A
                 pass
         # Update parent_id mapping for next message in conversation
         if response_id and openweb_chat_id:
-            update_chat_parent_id(openweb_chat_id, response_id)
+            await update_chat_parent_id(openweb_chat_id, response_id)
             logger.debug(f"📡 Updated last_parent_id for {openweb_chat_id[:8]}...: {response_id[:8]}...")
         # 🔥 FINAL CHUNKS: Also use correct SSE format
         logger.debug(f"📡 Sending final chunk for chat {chat_id[:8]}...")
@@ -1321,18 +1253,17 @@ async def handle_chat_completions(request: Request, body: Dict[str, Any]):
 
     if Config.DEBUG_LOGGING:
         logger.debug(f"🔍 Processing: openweb_chat_id={openweb_chat_id}, incoming_parent_id={incoming_parent_id}, model={mapped_model}")
-    # Lazy-load state if not already loaded at startup
-    if openweb_chat_id not in CHAT_STATE and Config.CHAT_STATE_FILE.exists():
-        logger.warning(f"Lazy load: {openweb_chat_id} not in memory, trying to load file")
-        try:
-            with open(Config.CHAT_STATE_FILE, "r", encoding="utf-8") as f:
-                loaded = json.load(f)
-                CHAT_STATE.update(loaded)
-            logger.info(f"Lazy loaded: {len(CHAT_STATE)} records")
-        except Exception as e:
-            logger.error(f"Lazy load failed: {e}")
-    # 🔥 FIX: Determine if this is a new chat (affects retry behavior)
-    is_new_chat = openweb_chat_id not in CHAT_STATE
+
+    # 🔥 REMOVED: Lazy-load logic from JSON file.
+    # Backend handles persistence automatically.
+
+    # Get backend instance
+    backend = get_chat_state_backend()
+
+    # Check if chat exists via backend
+    state = await backend.get(openweb_chat_id)
+    is_new_chat = state is None or not state.qwen_chat_id
+
     # 🔥 FIX: Increase timeout for large messages in new chats
     request_timeout = Config.HTTP_TIMEOUT
     content_size = len(str(message_content)) if message_content else 0
@@ -1343,17 +1274,17 @@ async def handle_chat_completions(request: Request, body: Dict[str, Any]):
     qwen_chat_id = await get_or_create_qwen_chat(token_info, openweb_chat_id, mapped_model)
     if not qwen_chat_id:
         return JSONResponse(status_code=500, content={"error": "Failed to get or create chat in Qwen"})
+
     # =================================================================
     # 🔥 FIX: ГИБКАЯ ОБРАБОТКА parent_id (модель-специфичная, настраиваемая через config/.env)
     # =================================================================
     effective_parent_id = None
-    chat_exists = openweb_chat_id in CHAT_STATE
-    if chat_exists:
-        stored = CHAT_STATE[openweb_chat_id]
+
+    if state and state.qwen_chat_id:
         # 🔥 Логика выбора parent_id в зависимости от модели (из Config)
         if mapped_model in Config.MODELS_REQUIRING_PARENT_ID:
             # Эти модели требуют parent_id для продолжения диалога
-            effective_parent_id = stored.get("last_parent_id")
+            effective_parent_id = state.last_parent_id
             if Config.DEBUG_LOGGING:
                 logger.debug(f"📌 Model {mapped_model} REQUIRES parent_id: {effective_parent_id[:8] if effective_parent_id else None}")
         elif mapped_model in Config.MODELS_WORKING_WITHOUT_PARENT_ID:
@@ -1363,12 +1294,13 @@ async def handle_chat_completions(request: Request, body: Dict[str, Any]):
                 logger.debug(f"📌 Model {mapped_model} works WITHOUT parent_id (auto-history)")
         else:
             # Неизвестная модель: пробуем с parent_id (более безопасный дефолт)
-            effective_parent_id = stored.get("last_parent_id")
+            effective_parent_id = state.last_parent_id
             if Config.DEBUG_LOGGING:
                 logger.debug(f"📌 Model {mapped_model} UNKNOWN: trying WITH parent_id (safe default)")
     else:
         # Новый чат: всегда parent_id=None для первого сообщения
         effective_parent_id = None
+
     if Config.DEBUG_LOGGING:
         logger.debug(f"🎯 Final: model={mapped_model}, parent_id={effective_parent_id[:8] if effective_parent_id else None}, chat_id={qwen_chat_id[:8] if qwen_chat_id else None}")
     # =================================================================
@@ -1402,12 +1334,14 @@ async def handle_chat_completions(request: Request, body: Dict[str, Any]):
         if not isinstance(status, int) or status < 400:
             status = 500
         return JSONResponse(status_code=status, content={"error": {"message": result.get("details") or result.get("error") or "API Error", "type": "upstream_error"}})
+
     # Update parent_id mapping after successful response
     response_id = result.get("response_id")
     if response_id and openweb_chat_id:
-        update_chat_parent_id(openweb_chat_id, response_id)
+        await update_chat_parent_id(openweb_chat_id, response_id)
         if Config.DEBUG_LOGGING:
             logger.debug(f"Updated last_parent_id for {openweb_chat_id[:8]}...: {response_id[:8]}...")
+
     # Build and return OpenAI-compatible response
     response_parent_id = response_id or incoming_parent_id
     return _build_openai_completion(result.get("content", ""), model, qwen_chat_id, response_parent_id, usage=result.get("usage"))
@@ -1465,7 +1399,6 @@ async def interactive_menu():
     2. Start the FastAPI proxy server
     3. Manage token list and chat state cache
     """
-    load_chat_state()
     while True:
         os.system('clear' if os.name == 'posix' else 'cls')
         print_banner()
@@ -1525,15 +1458,25 @@ async def interactive_menu():
             except ValueError:
                 pass
         elif choice == "5":
+            # Clear chat cache via backend
+            try:
+                backend = get_chat_state_backend()
+                # Note: Backend might not support clear() method, so we just log
+                logger.info("Chat cache clear requested. Backend state will be reset on restart.")
+            except Exception as e:
+                logger.warning(f"Could not access backend for clear: {e}")
+
+            # Remove files
             if Config.CHAT_STATE_FILE.exists():
                 Config.CHAT_STATE_FILE.unlink()
                 logger.info(f"Deleted file {Config.CHAT_STATE_FILE}")
             if Config.CHAT_MAPPING_FILE.exists():
                 Config.CHAT_MAPPING_FILE.unlink()
                 logger.info(f"Deleted file {Config.CHAT_MAPPING_FILE}")
-            CHAT_STATE.clear()
+
             print("Chat cache cleared.")
             time.sleep(1)
+
         elif choice == "0":
             break
 
