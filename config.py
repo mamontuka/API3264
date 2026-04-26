@@ -22,6 +22,7 @@
 # along with this program. If not, see <https://www.gnu.org/>.
 #
 #
+
 """
 Configuration module for FreeQwenApi Proxy
 All settings are loaded from environment variables with sensible defaults.
@@ -30,10 +31,19 @@ import os
 import logging
 from pathlib import Path
 from typing import List, Optional, Dict, Any
+from enum import Enum
 from dotenv import load_dotenv
 
-# Загружаем переменные окружения из .env
+# Load variables from .env
 load_dotenv()
+
+# =================================================================
+# ENUMS & CONSTANTS
+# =================================================================
+
+class ChatStateBackendType(str, Enum):
+    FILE = "file"
+    POSTGRES = "postgres"
 
 # =================================================================
 # BASE CONFIGURATION
@@ -125,6 +135,33 @@ class Config:
     OPENWEBUI_DB_PASSWORD: str = os.getenv("OPENWEBUI_DB_PASSWORD", "")
     OPENWEBUI_DB_SSL_MODE: str = os.getenv("OPENWEBUI_DB_SSL_MODE", "prefer")
     OPENWEBUI_DB_CONNECT_TIMEOUT: int = int(os.getenv("OPENWEBUI_DB_CONNECT_TIMEOUT", "5"))
+
+    # 🔥 CHAT STATE BACKEND CONFIGURATION
+    # Backend select: file, postgres
+    _RAW_BACKEND: str = os.getenv("CHAT_STATE_BACKEND", "file").lower()
+    try:
+        CHAT_STATE_BACKEND: ChatStateBackendType = ChatStateBackendType(_RAW_BACKEND)
+    except ValueError:
+        raise ValueError(f"Wrong CHAT_STATE_BACKEND='{_RAW_BACKEND}'. Correct values: 'file', 'postgres'.")
+
+    # 🔥 INDEPENDENT DATABASE FOR CHAT STATE
+    # Dont have any relations with OPENWEBUI_DB_*
+    CHAT_STATE_DB_HOST: str = os.getenv("CHAT_STATE_DB_HOST", "localhost")
+    CHAT_STATE_DB_PORT: int = int(os.getenv("CHAT_STATE_DB_PORT", "5432"))
+    CHAT_STATE_DB_NAME: str = os.getenv("CHAT_STATE_DB_NAME", "api3264_chat_state")
+    CHAT_STATE_DB_USER: str = os.getenv("CHAT_STATE_DB_USER", "freeqwenapi")
+    CHAT_STATE_DB_PASSWORD: str = os.getenv("CHAT_STATE_DB_PASSWORD", "freeqwenapi")
+    CHAT_STATE_DB_TABLE: str = os.getenv("CHAT_STATE_DB_TABLE", "chat_mappings")
+    CHAT_STATE_DB_POOL_MIN: int = int(os.getenv("CHAT_STATE_DB_POOL_MIN", "2"))
+    CHAT_STATE_DB_POOL_MAX: int = int(os.getenv("CHAT_STATE_DB_POOL_MAX", "10"))
+
+    # 🔥 Settings validation for PostgreSQL mode
+    if CHAT_STATE_BACKEND == ChatStateBackendType.POSTGRES:
+        _required_pg_vars = ["CHAT_STATE_DB_HOST", "CHAT_STATE_DB_USER", "CHAT_STATE_DB_PASSWORD", "CHAT_STATE_DB_NAME"]
+        _missing_pg_vars = [var for var in _required_pg_vars if not os.getenv(var)]
+        if _missing_pg_vars:
+            raise ValueError(f"CHAT_STATE_BACKEND=postgres require variables: {', '.join(_missing_pg_vars)}")
+
     # 🔥 Browser auth settings
     CHROME_USER_DATA: str = os.getenv("CHROME_USER_DATA", str(SCRIPT_DIR / "profile"))
     # 🔥 HTTP client settings
