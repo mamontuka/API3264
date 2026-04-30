@@ -227,7 +227,7 @@ def load_tokens_from_file():
 
         # Build headers dictionary
         headers = {
-            "User-Agent": "Mozilla/5.0",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36",
             "Authorization": f"Bearer {token}",
             "Cookie": cookie_str,
             "Referer": "https://chat.qwen.ai/"
@@ -514,7 +514,7 @@ def edit_image():
             }), 500
 
         # Download and encode result image
-        b64_result = download_and_encode_image(image_url, headers={"User-Agent": "Mozilla/5.0"})
+        b64_result = download_and_encode_image(image_url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36"})
 
         if not b64_result:
             return jsonify({
