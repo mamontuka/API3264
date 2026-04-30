@@ -169,7 +169,7 @@ class Config:
     HTTP_FOLLOW_REDIRECTS: bool = os.getenv("HTTP_FOLLOW_REDIRECTS", "true").lower() in ("true", "1", "yes", "on")
     # 🔥 Default headers for Qwen API requests
     DEFAULT_HEADERS: Dict[str, str] = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131.0.0.0 Safari/537.36",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36",
         "Accept": "application/json, text/plain, _/_",
         "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
         "Origin": QWEN_BASE_URL,
