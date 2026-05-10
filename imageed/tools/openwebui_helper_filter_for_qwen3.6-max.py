@@ -1,8 +1,9 @@
 """
 title: Qwen3.6-max Image Editor Fix
 description: Fix image extraction from chat for image_edit. Apply for qwen3.6-max LLM model.
-author: Oleh Mamont
+author: Oleh Mamont - https://github.com/mamontuka
 version: 1.1
+license: GPLv3
 type: filter
 """
 
