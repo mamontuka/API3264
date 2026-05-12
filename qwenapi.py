@@ -310,7 +310,7 @@ def mark_rate_limited(token_id, hours=24):
 # =================================================================
 # AUTH & BROWSER
 # =================================================================
-async def login_interactive(email=None, password=None, headless=False):
+async def login_interactive(email=None, password=None, headless=False, clear_existing=False):
     """
     Interactive browser login to obtain Qwen authentication token.
     Uses Playwright to automate browser login to Qwen Chat, then extracts:
@@ -321,73 +321,321 @@ async def login_interactive(email=None, password=None, headless=False):
         email: Optional email for auto-fill login
         password: Optional password for auto-fill login
         headless: Whether to run browser without GUI (default: False for interactive)
+        clear_existing: If True, removes all existing tokens before saving new one (default: False)
     Side effects:
         - Launches Chromium browser with persistent user data directory
         - Navigates to Qwen auth page
         - Optionally auto-fills credentials
         - Waits for user to complete login manually
         - Extracts and saves token + cookies to Config.TOKENS_FILE
+        - If clear_existing=True, deletes all previous tokens
     """
+    # 🔍 DEBUG: Function entry
+    logger.debug(f"🔧 login_interactive() called | email={email if email else 'None'}, password={'***' if password else 'None'}, headless={headless}, clear_existing={clear_existing}")
+    
     logger.info("Starting browser for auth (headless=%s)...", headless)
+    
+    # Check and create user data directory
     if not os.path.exists(Config.CHROME_USER_DATA):
+        logger.debug(f"📁 Creating Chrome user data directory: {Config.CHROME_USER_DATA}")
         os.makedirs(Config.CHROME_USER_DATA, exist_ok=True)
+    else:
+        logger.debug(f"📁 Chrome user data directory exists: {Config.CHROME_USER_DATA}")
+    
     logger.info(f"Using browser profile: {Config.CHROME_USER_DATA}")
+        
     async with async_playwright() as p:
-        # Launch persistent browser context (preserves login state across runs)
-        browser = await p.chromium.launch_persistent_context(
-            user_data_dir=Config.CHROME_USER_DATA,
-            headless=headless,
-            viewport={"width": 1280, "height": 720}
-        )
-        page = await browser.new_page()
-        auth_url = f"{Config.QWEN_BASE_URL}/auth?action=signin"
-        await page.goto(auth_url)
-        # Attempt auto-fill login if credentials provided
-        if email and password:
-            try:
-                # Wait for login form and fill email/username field
-                await page.wait_for_selector('input[type="text"], input[type="email"], #username', timeout=15000)
-                await page.fill('input[type="text"], input[type="email"], #username', email)
-                await page.keyboard.press("Enter")
-                await asyncio.sleep(3)  # Wait for transition to password field
-                # Fill password field
-                await page.wait_for_selector('input[type="password"], #password', timeout=10000)
-                await page.fill('input[type="password"], #password', password)
-                await page.keyboard.press("Enter")
-            except Exception as e:
-                logger.warning(f"Auto-fill failed: {e}")
-        # Prompt user to complete login manually in browser
-        print("\n" + "="*50 + "\n               AUTHORIZATION\n" + "="*50)
-        print("1. Login to Qwen account in browser.\n2. Wait for chat interface.\n3. Press Enter here.")
-        print("="*50 + "\n")
-        input("Press Enter after successful login...")
-        # Extract authentication token from browser localStorage
-        token = None
+        logger.debug(f"🌐 Playwright context entered")
+        
+        # 🔥 Browser config from Config (no hardcoded values!)
+        browser_config = {
+            "user_data_dir": Config.CHROME_USER_DATA,
+            "headless": headless,
+            "viewport": {
+                "width": Config.CHROME_VIEWPORT_WIDTH,
+                "height": Config.CHROME_VIEWPORT_HEIGHT
+            },
+            "executable_path": Config.CHROMIUM_EXECUTABLE_PATH,
+            "args": Config.CHROMIUM_ARGS,
+            "env": os.environ.copy(),
+            "ignore_default_args": Config.CHROMIUM_IGNORE_DEFAULT_ARGS
+        }
+        
+        # Логируем конфиг
+        logger.debug(f"🔧 Browser config: {json.dumps({k: v for k, v in browser_config.items() if k != 'env'}, ensure_ascii=False)}")
+        
         try:
-            token = await page.evaluate("localStorage.getItem('token')")
+            logger.info(f"🚀 Launching Chromium browser...")
+            
+            # 🔥 Используем распаковку **browser_config
+            browser = await p.chromium.launch_persistent_context(**browser_config)
+            
+            logger.info(f"✅ Browser launched successfully")
+            logger.debug(f"🌐 Browser context created")
+            
         except Exception as e:
-            logger.error(f"Failed to get token: {e}")
+            logger.error(f"❌ Failed to launch browser: {type(e).__name__}: {e}")
+            logger.debug(f"💡 Possible causes:")
+            logger.debug(f"💡   - Chromium not installed at {Config.CHROMIUM_EXECUTABLE_PATH}")
+            logger.debug(f"💡   - Missing dependencies (libnss3, libatk1.0, etc.)")
+            logger.debug(f"💡   - DISPLAY not set for headless=False")
+            logger.debug(f"💡   - Permission denied")
+            logger.debug(f"💡   - Invalid args in CHROMIUM_ARGS")
+            raise
+        
+        try:
+            logger.debug(f"📄 Creating new page...")
+            page = await browser.new_page()
+            logger.debug(f"✅ Page created")
+            
+            auth_url = f"{Config.QWEN_BASE_URL}/auth?action=signin"
+            logger.info(f"🌐 Navigating to auth URL: {auth_url}")
+            logger.debug(f"📤 Going to: {auth_url}")
+            
+            try:
+                await page.goto(auth_url)
+                logger.info(f"✅ Navigation completed")
+                logger.debug(f"📄 Current URL: {page.url}")
+                logger.debug(f"📄 Page title: {await page.title()}")
+                
+            except Exception as nav_err:
+                logger.error(f"❌ Navigation failed: {nav_err}")
+                logger.debug(f"💡 Check network connectivity and QWEN_BASE_URL config")
+                await browser.close()
+                return
+            
+            # Attempt auto-fill login if credentials provided
+            if email and password:
+                logger.info(f"🔐 Attempting auto-fill login...")
+                logger.debug(f"🔐 Email: {email}")
+                logger.debug(f"🔐 Password: {'*' * len(password)}")
+                
+                try:
+                    # Wait for login form and fill email/username field
+                    logger.debug(f"⏳ Waiting for username selector...")
+                    await page.wait_for_selector('input[type="text"], input[type="email"], #username', timeout=15000)
+                    logger.debug(f"✅ Username selector found")
+                    
+                    logger.debug(f"✍️ Filling email field...")
+                    await page.fill('input[type="text"], input[type="email"], #username', email)
+                    logger.debug(f"✅ Email filled")
+                    
+                    logger.debug(f"⌨️ Pressing Enter...")
+                    await page.keyboard.press("Enter")
+                    logger.debug(f"✅ Enter pressed")
+                    
+                    logger.debug(f"⏳ Waiting 3s for transition to password field...")
+                    await asyncio.sleep(3)  # Wait for transition to password field
+                    logger.debug(f"✅ Wait completed")
+                    
+                    # Fill password field
+                    logger.debug(f"⏳ Waiting for password selector...")
+                    await page.wait_for_selector('input[type="password"], #password', timeout=10000)
+                    logger.debug(f"✅ Password selector found")
+                    
+                    logger.debug(f"✍️ Filling password field...")
+                    await page.fill('input[type="password"], #password', password)
+                    logger.debug(f"✅ Password filled")
+                    
+                    logger.debug(f"⌨️ Pressing Enter...")
+                    await page.keyboard.press("Enter")
+                    logger.debug(f"✅ Enter pressed")
+                    
+                    logger.info(f"✅ Auto-fill completed successfully")
+                    logger.debug(f"💡 Waiting for login to complete...")
+                    
+                except Exception as e:
+                    logger.warning(f"⚠️ Auto-fill failed: {type(e).__name__}: {e}")
+                    logger.debug(f"💡 Possible causes:")
+                    logger.debug(f"💡   - Selectors changed on Qwen auth page")
+                    logger.debug(f"💡   - Page loaded too slowly (timeout)")
+                    logger.debug(f"💡   - 2FA required")
+                    logger.debug(f"💡 Continuing with manual login...")
+            else:
+                logger.debug(f"ℹ️ No credentials provided, skipping auto-fill")
+            
+            # Prompt user to complete login manually in browser
+            print("\n" + "="*50 + "\n               AUTHORIZATION\n" + "="*50)
+            print("1. Login to Qwen account in browser.\n2. Wait for chat interface.\n3. Press Enter here.")
+            print("="*50 + "\n")
+            
+            logger.info(f"⏳ Waiting for user to complete login...")
+            logger.debug(f"💡 User should login in browser and press Enter in terminal")
+            
+            # Use asyncio.to_thread for non-blocking input in async context
+            try:
+                await asyncio.to_thread(lambda: input("Press Enter after successful login..."))
+                logger.info(f"✅ User confirmed login completion")
+            except Exception as input_err:
+                logger.error(f"❌ Input error: {input_err}")
+                await browser.close()
+                return
+            
+            # Wait a bit for page to stabilize after login
+            logger.debug(f"⏳ Waiting 2s for page to stabilize...")
+            await asyncio.sleep(2)
+            logger.debug(f"📄 Current URL after login: {page.url}")
+            logger.debug(f"📄 Page title after login: {await page.title()}")
+            
+            # Extract authentication token from browser localStorage
+            logger.info(f"🔑 Extracting authentication token...")
+            token = None
+            
+            try:
+                # Debug: List all localStorage keys first
+                logger.debug(f"🔍 Checking localStorage keys...")
+                storage_keys = await page.evaluate("Object.keys(localStorage)")
+                logger.debug(f"📦 localStorage keys: {storage_keys}")
+                
+                # Check for common token key names
+                possible_keys = ['token', 'auth_token', 'accessToken', 'access_token', 'qwen_token']
+                for key in possible_keys:
+                    if key in storage_keys:
+                        logger.debug(f"✅ Found potential token key: '{key}'")
+                
+                if 'token' not in storage_keys:
+                    logger.warning(f"⚠️ 'token' key not found in localStorage!")
+                    logger.debug(f"💡 Available keys: {storage_keys}")
+                    logger.debug(f"💡 Qwen may have changed the token key name")
+                
+                # Extract token
+                logger.debug(f"🔑 Extracting token from localStorage.getItem('token')...")
+                token = await page.evaluate("localStorage.getItem('token')")
+                
+                if token:
+                    token_preview = token[:8] + '...' if len(token) > 8 else token
+                    logger.info(f"✅ Token extracted successfully: {token_preview}")
+                    logger.debug(f"🔑 Token length: {len(token)} chars")
+                else:
+                    logger.error(f"❌ Token is null/empty in localStorage")
+                    logger.debug(f"💡 Possible causes:")
+                    logger.debug(f"💡   - Login not completed successfully")
+                    logger.debug(f"💡   - Token stored under different key")
+                    logger.debug(f"💡   - Token stored in cookies only")
+                    logger.debug(f"💡   - Qwen changed auth mechanism")
+                    
+                    # Try alternative extraction methods
+                    logger.debug(f"🔍 Trying alternative token extraction...")
+                    
+                    # Check cookies for token
+                    logger.debug(f"🍪 Checking cookies for token...")
+                    cookies_alt = await page.context.cookies()
+                    for cookie in cookies_alt:
+                        if 'token' in cookie.get('name', '').lower():
+                            logger.debug(f"🍪 Found token-like cookie: {cookie['name']}")
+                    
+            except Exception as e:
+                logger.error(f"❌ Failed to get token: {type(e).__name__}: {e}")
+                logger.debug(f"📋 Full exception:", exc_info=True)
+                await browser.close()
+                return
+            
+            if not token:
+                logger.error("❌ Token not found! Cannot proceed.")
+                logger.debug(f"💡 Suggestions:")
+                logger.debug(f"💡   - Ensure you logged in successfully in browser")
+                logger.debug(f"💡   - Wait for chat interface to fully load before pressing Enter")
+                logger.debug(f"💡   - Check if Qwen changed their auth mechanism")
+                await browser.close()
+                return
+            
+            # Extract session cookies for request persistence
+            logger.info(f"🍪 Extracting session cookies...")
+            try:
+                cookies = await page.context.cookies()
+                logger.info(f"✅ Extracted {len(cookies)} cookies")
+                
+                # Log cookie details
+                for idx, cookie in enumerate(cookies):
+                    cookie_name = cookie.get('name', 'unknown')
+                    cookie_domain = cookie.get('domain', 'unknown')
+                    cookie_value_preview = cookie.get('value', '')[:8] + '...' if len(cookie.get('value', '')) > 8 else cookie.get('value', '')
+                    logger.debug(f"🍪 Cookie[{idx}]: name={cookie_name}, domain={cookie_domain}, value={cookie_value_preview}")
+                
+                # Check for important cookies
+                important_cookies = ['token', 'session', 'auth', 'qwen']
+                found_important = []
+                for cookie in cookies:
+                    for imp in important_cookies:
+                        if imp in cookie.get('name', '').lower():
+                            found_important.append(cookie['name'])
+                
+                if found_important:
+                    logger.debug(f"✅ Found important cookies: {found_important}")
+                else:
+                    logger.warning(f"⚠️ No obvious auth cookies found")
+                    
+            except Exception as e:
+                logger.error(f"❌ Failed to extract cookies: {e}")
+                cookies = []
+            
+            # 🔥 IMPROVEMENT: Load or clear existing tokens
+            logger.debug(f"💾 Preparing token data for save...")
+            if clear_existing:
+                logger.info("🧹 Clearing existing tokens (clear_existing=True)...")
+                tokens = []
+                logger.debug(f"🗑️ All previous tokens removed from memory")
+            else:
+                tokens = load_tokens()
+                logger.debug(f"📦 Loaded {len(tokens)} existing tokens from file")
+            
+            account_name = email or f"acc_{int(time.time() * 1000)}"
+            logger.debug(f"👤 Account name: {account_name}")
+            
+            # Remove existing entry for this account to avoid duplicates
+            old_count = len(tokens)
+            tokens = [t for t in tokens if t['id'] != account_name]
+            new_count = len(tokens)
+            
+            if old_count != new_count:
+                logger.debug(f"🗑️ Removed existing token for account: {account_name}")
+            else:
+                logger.debug(f"➕ No existing token for account, adding new")
+            
+            # Add new token entry
+            token_entry = {
+                "id": account_name,
+                "token": token,
+                "cookies": cookies,
+                "added_at": datetime.now().isoformat(),
+                "invalid": False,
+                "resetAt": None
+            }
+            tokens.append(token_entry)
+            
+            logger.debug(f"📦 Token entry prepared:")
+            logger.debug(f"   id: {token_entry['id']}")
+            logger.debug(f"   token: {token[:8]}...")
+            logger.debug(f"   cookies_count: {len(token_entry['cookies'])}")
+            logger.debug(f"   added_at: {token_entry['added_at']}")
+            logger.debug(f"   invalid: {token_entry['invalid']}")
+            logger.debug(f"   resetAt: {token_entry['resetAt']}")
+            
+            # Save tokens
+            logger.info(f"💾 Saving tokens to {Config.TOKENS_FILE}...")
+            try:
+                save_tokens(tokens)
+                logger.info(f"✅ Tokens saved successfully")
+                logger.debug(f"📁 File: {Config.TOKENS_FILE}")
+                logger.debug(f"📊 Total tokens in file: {len(tokens)}")
+            except Exception as save_err:
+                logger.error(f"❌ Failed to save tokens: {save_err}")
+                await browser.close()
+                return
+            
+            logger.info(f"✅ Account {account_name} added successfully!")
+            logger.debug(f"🎉 Login process completed successfully")
+            
+        except Exception as e:
+            logger.error(f"❌ Unexpected error during login: {type(e).__name__}: {e}")
+            logger.debug(f"📋 Full exception:", exc_info=True)
+            raise
+            
+        finally:
+            logger.debug(f"🔒 Closing browser...")
             await browser.close()
-            return
-        if not token:
-            logger.error("Token not found!")
-            await browser.close()
-            return
-        # Extract session cookies for request persistence
-        cookies = await page.context.cookies()
-        tokens = load_tokens()
-        account_name = email or f"acc_{int(time.time() * 1000)}"
-        # Remove existing entry for this account to avoid duplicates
-        tokens = [t for t in tokens if t['id'] != account_name]
-        # Add new token entry
-        tokens.append({
-            "id": account_name, "token": token, "cookies": cookies,
-            "added_at": datetime.now().isoformat(), "invalid": False, "resetAt": None
-        })
-        save_tokens(tokens)
-        logger.info(f"Account {account_name} added successfully!")
-        await browser.close()
-
+            logger.debug(f"✅ Browser closed")
+            
 # =================================================================
 # CORE PROXY ENGINE
 # =================================================================
@@ -402,12 +650,29 @@ async def create_qwen_chat(token_obj, model=Config.DEFAULT_MODEL):
     Raises:
         Logs errors but doesn't raise exceptions (caller handles None return)
     """
+    # 🔍 DEBUG: Function entry with context
+    token_id = token_obj.get('id', 'unknown')
+    token_preview = token_obj['token'][:8] + '...' if token_obj.get('token') else 'None'
+    logger.debug(f"🔧 create_qwen_chat() called | token_id={token_id}, token={token_preview}, model={model}")
+
     token = token_obj['token']
+
     # Set cookies from token_obj for session persistence
     if 'cookies' in token_obj:
-        for cookie in token_obj['cookies']:
+        cookies = token_obj['cookies']
+        logger.debug(f"🍪 Setting {len(cookies)} cookies for token {token_id}")
+        for idx, cookie in enumerate(cookies):
+            cookie_name = cookie.get('name', 'unknown')
+            cookie_domain = cookie.get('domain', 'unknown')
+            logger.debug(f"🍪 Cookie[{idx}]: name={cookie_name}, domain={cookie_domain}")
             if cookie['name'] not in http_client.cookies:
                 http_client.cookies.set(cookie['name'], cookie['value'], domain=cookie['domain'])
+                logger.debug(f"🍪 Added cookie: {cookie_name}")
+            else:
+                logger.debug(f"🍪 Cookie already exists: {cookie_name}")
+    else:
+        logger.debug(f"🍪 No cookies in token_obj for token {token_id}")
+
     # Build request headers for Qwen API
     headers = {
         "Content-Type": "application/json", "Authorization": f"Bearer {token}",
@@ -415,36 +680,144 @@ async def create_qwen_chat(token_obj, model=Config.DEFAULT_MODEL):
         "Accept-Language": Config.DEFAULT_HEADERS["Accept-Language"],
         "Origin": Config.QWEN_BASE_URL, "Referer": Config.CHAT_PAGE_URL,
     }
+    logger.debug(f"📤 Request headers keys: {list(headers.keys())}")
+    logger.debug(f"📤 Authorization header: Bearer {token[:8]}...")
+
     # Payload for creating a new chat
     payload = {
         "title": "New Chat", "models": [model], "chat_mode": "normal",
         "chat_type": "t2t", "timestamp": int(time.time() * 1000)
     }
+    logger.debug(f"📤 Request payload: {json.dumps(payload, ensure_ascii=False)}")
+    logger.debug(f"🌐 Request URL: {Config.CREATE_CHAT_URL}")
+
     try:
+        logger.info(f"🚀 Sending POST request to create chat... (timeout=30.0s)")
+        start_time = time.time()
+
         resp = await http_client.post(Config.CREATE_CHAT_URL, headers=headers, json=payload, timeout=30.0)
+
+        elapsed = time.time() - start_time
+        logger.info(f"📥 Response received in {elapsed:.2f}s | status_code={resp.status_code}")
+
+        # 🔍 DEBUG: Log all response headers
+        logger.debug(f"📥 Response headers: {dict(resp.headers)}")
+
+        # Check for x-actual-status-code (Qwen-specific)
+        actual_status = resp.headers.get("x-actual-status-code")
+        if actual_status:
+            logger.debug(f"📥 x-actual-status-code: {actual_status}")
+
+        # 🔍 DEBUG: Log response body preview
+        resp_text = resp.text
+        body_preview = resp_text[:1000] if len(resp_text) > 1000 else resp_text
+        logger.debug(f"📥 Response body preview:\n{body_preview}")
+
         if resp.status_code == 200:
             content_type = resp.headers.get("content-type", "")
+            logger.debug(f"📥 Content-Type: {content_type}")
+
             if "application/json" not in content_type:
-                logger.error(f"Unexpected content ({content_type}): {resp.text[:500]}")
+                logger.error(f"❌ Unexpected content-type: {content_type}")
+                logger.error(f"❌ Response body: {resp_text[:500]}")
+                logger.debug(f"💡 Expected JSON but got different content type. Possible API change or error page.")
                 return None
+
             try:
+                logger.debug(f"🔍 Parsing JSON response...")
                 data = resp.json()
-                chat_id = data.get('data', {}).get('id')
+                logger.debug(f"📦 Parsed JSON structure: {json.dumps(data, ensure_ascii=False)[:500]}")
+
+                # Check for error indicators in response
+                if data.get("success") is False:
+                    logger.error(f"❌ API returned success=false")
+                    logger.error(f"❌ Error details: {json.dumps(data, ensure_ascii=False)}")
+                    return None
+
+                if data.get("code"):
+                    logger.error(f"❌ API returned error code: {data.get('code')}")
+                    logger.error(f"❌ Full response: {json.dumps(data, ensure_ascii=False)}")
+                    return None
+
+                # Extract chat_id
+                data_section = data.get('data', {})
+                logger.debug(f"🔍 data section: {data_section}")
+
+                if not isinstance(data_section, dict):
+                    logger.error(f"❌ 'data' field is not a dict: type={type(data_section)}, value={data_section}")
+                    return None
+
+                chat_id = data_section.get('id')
+                logger.debug(f"🔍 Extracted chat_id: {chat_id}")
+
                 if chat_id:
-                    logger.info(f"Chat created on Qwen: {chat_id}")
-                return chat_id
+                    logger.info(f"✅ Chat created successfully on Qwen: {chat_id}")
+                    logger.debug(f"✅ Full response data: {json.dumps(data, ensure_ascii=False)}")
+                    return chat_id
+                else:
+                    logger.error(f"❌ No 'id' field in response data!")
+                    logger.error(f"❌ Available keys in data: {list(data_section.keys()) if isinstance(data_section, dict) else 'N/A'}")
+                    logger.error(f"❌ Full response: {json.dumps(data, ensure_ascii=False)}")
+                    return None
+
+            except json.JSONDecodeError as je:
+                logger.error(f"❌ JSON decode error: {je}")
+                logger.error(f"❌ Raw response body: {resp_text[:500]}")
+                logger.debug(f"💡 Response is not valid JSON. Possible HTML error page or API change.")
+                return None
             except Exception as je:
-                logger.error(f"JSON parse error: {je}. Body: {resp.text[:500]}")
+                logger.error(f"❌ Unexpected error parsing response: {type(je).__name__}: {je}")
+                logger.error(f"❌ Raw response body: {resp_text[:500]}")
+                return None
         else:
-            logger.error(f"Chat creation error: {resp.status_code}, body: {resp.text[:500]}")
+            logger.error(f"❌ Chat creation failed: HTTP {resp.status_code}")
+            logger.error(f"❌ Response body: {resp_text[:500]}")
+
+            if actual_status:
+                logger.error(f"❌ x-actual-status-code: {actual_status}")
+
             if resp.status_code >= 400:
+                logger.debug(f"🔍 Attempting to parse error details from response...")
                 try:
                     err_data = resp.json()
-                    logger.error(f"Error details: {json.dumps(err_data, ensure_ascii=False)[:300]}")
-                except:
-                    logger.error(f"Error body: {resp.text[:300]}")
+                    logger.error(f"❌ Error details (JSON): {json.dumps(err_data, ensure_ascii=False)}")
+
+                    # Check for specific error patterns
+                    if err_data.get("code") == "RateLimited":
+                        logger.error(f"🚫 RATE LIMITED! Token {token_id} is rate limited.")
+                        logger.debug(f"💡 Consider marking token as rate limited or switching to another token.")
+                    elif err_data.get("code") == "Unauthorized" or resp.status_code == 401:
+                        logger.error(f"🚫 UNAUTHORIZED! Token {token_id} may be invalid or expired.")
+                        logger.debug(f"💡 Token needs refresh or re-login.")
+                    elif err_data.get("message"):
+                        logger.error(f"❌ Error message: {err_data.get('message')}")
+
+                except json.JSONDecodeError:
+                    logger.error(f"❌ Error response is not valid JSON: {resp_text[:300]}")
+                except Exception as parse_err:
+                    logger.error(f"❌ Error parsing error response: {parse_err}")
+
+            # 🔍 DEBUG: Suggest possible causes
+            logger.debug(f"💡 Possible causes:")
+            logger.debug(f"💡   - Token expired or invalid")
+            logger.debug(f"💡   - Model '{model}' not supported for chat creation")
+            logger.debug(f"💡   - Rate limit exceeded")
+            logger.debug(f"💡   - API endpoint changed")
+            logger.debug(f"💡   - Network/proxy issues")
+
+    except httpx.TimeoutException as e:
+        logger.error(f"⏰ Timeout exception: {e}")
+        logger.debug(f"💡 Request timed out after 30s. Qwen API may be slow or unreachable.")
+    except httpx.ConnectError as e:
+        logger.error(f"🔌 Connection error: {e}")
+        logger.debug(f"💡 Cannot connect to Qwen API. Check network connectivity.")
+    except httpx.HTTPError as e:
+        logger.error(f"🌐 HTTP error: {type(e).__name__}: {e}")
     except Exception as e:
-        logger.error(f"Exception creating chat: {e}")
+        logger.error(f"💥 Exception creating chat: {type(e).__name__}: {e}")
+        logger.debug(f"📋 Full exception details:", exc_info=True)
+
+    logger.debug(f"🔚 create_qwen_chat() returning None")
     return None
 
 def build_qwen_payload(message_content, model, chat_id, parent_id=None, system_message=None, files=None):
@@ -1486,6 +1859,7 @@ def parse_args():
     Supported arguments:
     --start-proxy   : Start FastAPI proxy immediately
     --login         : Start interactive Qwen auth via browser
+    --clear-tokens  : Remove old/dead tokens before login
     --list-tokens   : List current tokens and exit
     --email         : Email for login (optional, with --login)
     --password      : Password for login (optional, with --login)
@@ -1498,6 +1872,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description="FreeQwenApi CLI Launcher")
     parser.add_argument("--start-proxy", action="store_true", help="Start FastAPI proxy immediately")
     parser.add_argument("--login", action="store_true", help="Start interactive Qwen auth via browser")
+    parser.add_argument("--clear-tokens", action="store_true", help="Remove old/dead tokens before login")
     parser.add_argument("--list-tokens", action="store_true", help="List current tokens")
     parser.add_argument("--email", type=str, help="Email for login (optional)")
     parser.add_argument("--password", type=str, help="Password for login (optional)")
@@ -1514,7 +1889,7 @@ if __name__ == "__main__":
     args = parse_args()
     if args.login:
         import asyncio
-        asyncio.run(login_interactive(email=args.email, password=args.password))
+        asyncio.run(login_interactive(email=args.email, password=args.password, clear_existing=args.clear_tokens))
     elif args.list_tokens:
         tokens = load_tokens()
         print(json.dumps(tokens, indent=2, ensure_ascii=False))
