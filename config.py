@@ -164,6 +164,35 @@ class Config:
 
     # 🔥 Browser auth settings
     CHROME_USER_DATA: str = os.getenv("CHROME_USER_DATA", str(SCRIPT_DIR / "profile"))
+
+    # Chromium executable path
+    CHROMIUM_EXECUTABLE_PATH: str = os.getenv(
+        "CHROMIUM_EXECUTABLE_PATH", 
+        "/usr/lib/chromium/chromium"
+    )
+
+    # Chromium launch arguments (comma-separated in .env)
+    _CHROMIUM_ARGS_RAW: str = os.getenv(
+        "CHROMIUM_ARGS",
+        "--no-sandbox,--no-first-run,--no-default-browser-check,--disable-features=TranslateUI"
+    )
+    CHROMIUM_ARGS: List[str] = [
+        arg.strip() for arg in _CHROMIUM_ARGS_RAW.split(",") if arg.strip()
+    ]
+
+    # Arguments to ignore from Playwright defaults
+    _CHROMIUM_IGNORE_ARGS_RAW: str = os.getenv(
+        "CHROMIUM_IGNORE_DEFAULT_ARGS",
+        "--enable-automation"
+    )
+    CHROMIUM_IGNORE_DEFAULT_ARGS: List[str] = [
+        arg.strip() for arg in _CHROMIUM_IGNORE_ARGS_RAW.split(",") if arg.strip()
+    ]
+
+    # Viewport settings
+    CHROME_VIEWPORT_WIDTH: int = int(os.getenv("CHROME_VIEWPORT_WIDTH", "1280"))
+    CHROME_VIEWPORT_HEIGHT: int = int(os.getenv("CHROME_VIEWPORT_HEIGHT", "720"))
+
     # 🔥 HTTP client settings
     HTTP_TIMEOUT: float = float(os.getenv("HTTP_TIMEOUT", "900.0"))
     HTTP_FOLLOW_REDIRECTS: bool = os.getenv("HTTP_FOLLOW_REDIRECTS", "true").lower() in ("true", "1", "yes", "on")
