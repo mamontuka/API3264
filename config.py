@@ -155,6 +155,53 @@ class Config:
     CHAT_STATE_DB_POOL_MIN: int = int(os.getenv("CHAT_STATE_DB_POOL_MIN", "2"))
     CHAT_STATE_DB_POOL_MAX: int = int(os.getenv("CHAT_STATE_DB_POOL_MAX", "10"))
 
+    # ===========================================================================
+    # ERROR MESSAGES CONFIGURATION
+    # ===========================================================================
+    # Error messages and hints are externalized for flexibility and localization.
+    # Supports three languages with TTS language tags: EN, RU, UA.
+    # Override any message via environment variables in .env file.
+    # ===========================================================================
+
+    ERROR_MESSAGES = {
+        "rate_limit_exceeded": {
+            "message": os.getenv("ERR_RATE_LIMIT_MSG", " EN: Request limit exceeded. Service temporarily unavailable.\n RU: Лимит запросов исчерпан. Сервис временно недоступен.\n UA: Ліміт запитів вичерпано. Сервіс тимчасово недоступний.\n"),
+            "hint": os.getenv("ERR_RATE_LIMIT_HINT", " EN: Try again in a few minutes.\n RU: Попробуйте повторить запрос через несколько минут.\n UA: Спробуйте повторити запит через кілька хвилин.\n")
+        },
+        "chat_locked": {
+            "message": os.getenv("ERR_CHAT_LOCKED_MSG", " EN: Chat is busy processing a previous message.\n RU: Чат занят обработкой предыдущего сообщения.\n UA: Чат зайнятий обробкою попереднього повідомлення.\n"),
+            "hint": os.getenv("ERR_CHAT_LOCKED_HINT", " EN: Wait for the current operation to complete and retry.\n RU: Подождите завершения текущей операции и повторите запрос.\n UA: Дочекайтеся завершення поточної операції та повторіть запит.\n")
+        },
+        "auth_failed": {
+            "message": os.getenv("ERR_AUTH_FAILED_MSG", " EN: Authentication error on uplink server.\n RU: Ошибка аутентификации на вышестоящем сервере.\n UA: Помилка аутентифікації на вищому сервері.\n"),
+            "hint": os.getenv("ERR_AUTH_FAILED_HINT", " EN: Administration has been notified and is taking action.\n RU: Администрация извещена и принимает меры.\n UA: Адміністрація повідомлена та вживає заходів.\n")
+        },
+        "model_overloaded": {
+            "message": os.getenv("ERR_MODEL_OVERLOADED_MSG", " EN: Model is overloaded. Service is experiencing high load.\n RU: Модель перегружена. Сервис испытывает высокую нагрузку.\n UA: Модель перевантажена. Сервіс зазнає високого навантаження.\n"),
+            "hint": os.getenv("ERR_MODEL_OVERLOADED_HINT", " EN: Retry later or select a different model.\n RU: Попробуйте повторить запрос позже или выберите другую модель.\n UA: Спробуйте повторити запит пізніше або оберіть іншу модель.\n")
+        },
+        "invalid_request": {
+            "message": os.getenv("ERR_INVALID_REQUEST_MSG", " EN: Invalid request.\n RU: Некорректный запрос.\n UA: Некоректний запит.\n"),
+            "hint": os.getenv("ERR_INVALID_REQUEST_HINT", " EN: Check request parameters (model, parent_id, message format).\n RU: Проверьте параметры запроса (модель, parent_id, формат сообщения).\n UA: Перевірте параметри запиту (модель, parent_id, формат повідомлення).\n")
+        },
+        "context_length_exceeded": {
+            "message": os.getenv("ERR_CONTEXT_LENGTH_MSG", " EN: Context length exceeds the limit of {max_len} tokens.\n RU: Длина контекста превышает лимит в {max_len} токенов.\n UA: Довжина контексту перевищує ліміт у {max_len} токенів.\n"),
+            "hint": os.getenv("ERR_CONTEXT_LENGTH_HINT", " EN: Shorten your message, clear history, or start a new chat.\n RU: Сократите сообщение, очистите историю или начните новый чат.\n UA: Скоротіть повідомлення, очистіть історію або почніть новий чат.\n")
+        },
+        "upstream_internal_error": {
+            "message": os.getenv("ERR_INTERNAL_MSG", " EN: Internal error on uplink server side.\n RU: Внутренняя ошибка на стороне вышестоящего сервера.\n UA: Внутрішня помилка на стороні вищого сервера.\n"),
+            "hint": os.getenv("ERR_INTERNAL_HINT", " EN: Administration has been notified and is taking action. Retry in a minute.\n RU: Администрация извещена и принимает меры. Попробуйте повторить запрос через минуту.\n UA: Адміністрація повідомлена та вживає заходів. Спробуйте повторити запит через хвилину.\n")
+        },
+        "network_timeout": {
+            "message": os.getenv("ERR_TIMEOUT_MSG", " EN: Response timeout or connection error.\n RU: Превышено время ожидания ответа или ошибка соединения.\n UA: Перевищено час очікування відповіді або помилка з'єднання.\n"),
+            "hint": os.getenv("ERR_TIMEOUT_HINT", " EN: Try again in a few minutes.\n RU: Попробуйте снова через несколько минут.\n UA: Спробуйте знову через кілька хвилин.\n")
+        },
+        "unknown_error": {
+            "message": os.getenv("ERR_UNKNOWN_MSG", " EN: An error occurred while processing the request.\n RU: Произошла ошибка при обработке запроса.\n UA: Сталася помилка під час обробки запиту.\n"),
+            "hint": os.getenv("ERR_UNKNOWN_HINT", " EN: Details are available for administrators in server logs.\n RU: Подробности доступны администрации в логах сервера.\n UA: Подробиці доступні адміністрації в логах сервера.\n")
+        }
+    }
+
     # 🔥 Settings validation for PostgreSQL mode
     if CHAT_STATE_BACKEND == ChatStateBackendType.POSTGRES:
         _required_pg_vars = ["CHAT_STATE_DB_HOST", "CHAT_STATE_DB_USER", "CHAT_STATE_DB_PASSWORD", "CHAT_STATE_DB_NAME"]
