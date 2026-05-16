@@ -48,8 +48,8 @@ Key Features:
     • Comprehensive logging for debugging and monitoring
 Usage:
     1. Configure environment variables in .env or config.py
-    2. Run: python qwenapi.py --start-proxy --host 0.0.0.0 --port 3269
-    3. Point your OpenAI-compatible client to http://<host>:3269/api
+    2. Run: python qwenapi.py --start-proxy --host 0.0.0.0 --port 3264
+    3. Point your OpenAI-compatible client to http://<host>:3264/api
 Author: Oleh Mamont et al.
 License: GPLv3
 """
