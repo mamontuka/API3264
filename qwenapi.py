@@ -361,13 +361,13 @@ async def login_interactive(email=None, password=None, headless=False, clear_exi
             "ignore_default_args": Config.CHROMIUM_IGNORE_DEFAULT_ARGS
         }
         
-        # Логируем конфиг
+        # Logging the config
         logger.debug(f"🔧 Browser config: {json.dumps({k: v for k, v in browser_config.items() if k != 'env'}, ensure_ascii=False)}")
         
         try:
             logger.info(f"🚀 Launching Chromium browser...")
             
-            # 🔥 Используем распаковку **browser_config
+            # 🔥 Using **browser_config unpacking
             browser = await p.chromium.launch_persistent_context(**browser_config)
             
             logger.info(f"✅ Browser launched successfully")
@@ -1007,7 +1007,7 @@ def _generate_openweb_chat_id(request: Request, body: Dict[str, Any], model: str
     # Returning a placeholder here if DB is strictly required in this sync function would break things.
     # Instead, we assume this function is only called where DB result isn't critical OR
     # we refactor the caller to be fully async.
-    # 🔥 FIX: Since this function is called inside handle_chat_completions (which is async),
+    # 🔥 Since this function is called inside handle_chat_completions (which is async),
     # we should make THIS function async too. See handle_chat_completions for the await call.
 
     # Fallback to stable hash or random UUID if DB not checked here
@@ -1109,6 +1109,131 @@ def _parse_qwen_error_json(parsed: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     is_rate_limited = top_code == "RateLimited" or nested_code == "RateLimited"
     return {"status": 429 if is_rate_limited else 500, "error": "API Error", "details": json.dumps(parsed, ensure_ascii=False)}
 
+def _format_user_error(result: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Formats error response for the user based on Qwen API result.
+
+    Parses raw error/details, classifies the error type, and returns
+    a structured message using Config.ERROR_MESSAGES for localization.
+
+    Args:
+        result: Dictionary containing execution result keys:
+            - success: bool
+            - status: int (HTTP status code)
+            - error: str (error label)
+            - details: str (raw error body, may be JSON string or plain text)
+
+    Returns:
+        Dict with formatted error information:
+            - message: User-readable message with TTS language tags (from config)
+            - type: Error classification (e.g., rate_limit_exceeded, chat_locked)
+            - hint: Actionable recommendation for the user (from config)
+            - status: HTTP status code to return to client
+    """
+    # Normalize status code
+    status = result.get("status") or 500
+    if not isinstance(status, int) or status < 400:
+        status = 500
+    raw_error = result.get("error", "")
+    raw_details = result.get("details", "")
+
+    # Combine all text data for pattern matching — always use lower() and strip()
+    combined = f"{raw_error} {raw_details}".lower().strip()
+
+    # Attempt to parse JSON from details field (may fail — that's OK)
+    parsed_json = None
+    if raw_details:
+        try:
+            parsed_json = json.loads(raw_details)
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+    # === ERROR CLASSIFICATION (ORDER IS CRITICAL!) ===
+    error_type = "unknown_error"
+    detail_msg = ""
+
+    # 1. Rate Limited
+    if status == 429 or "ratelimited" in combined or "rate limit" in combined:
+        error_type = "rate_limit_exceeded"
+        status = 429
+
+    # 2. Chat Locked / In Progress
+    elif "chat is in progress" in combined or "chat locked" in combined:
+        error_type = "chat_locked"
+        status = 409
+
+    # 3. Auth Failed / Unauthorized
+    elif status == 401 or "unauthorized" in combined or "invalid token" in combined or "authentication" in combined:
+        error_type = "auth_failed"
+        status = 401
+
+    # 4. Model Overloaded / Busy
+    elif "model overloaded" in combined or "service busy" in combined:
+        error_type = "model_overloaded"
+        status = 503
+
+    # 5. 🚨 CONTEXT LENGTH EXCEEDED - now works REGARDLESS of status!
+    # We check using keywords and regular expressions in raw_details (even if the status is 502/500)
+    context_len_patterns = [
+        "input length",
+        "range of input",
+        "max input length",
+        "exceeds max length",
+        "invalidparameter",
+        "algo.invalidparameter"
+    ]
+    if any(p in combined for p in context_len_patterns):
+        # We are looking for numbers in brackets: [1, 258048]
+        import re
+        match = re.search(r"\[(\d+)\s*,\s*(\d+)\]", raw_details)
+        if not match:
+            # We're trying to find just the numbers after "should be" or "max"
+            match = re.search(r"should be.*?(\d+)", raw_details)
+            if not match:
+                match = re.search(r"max.*?(\d+)", raw_details)
+        if match:
+            max_len = int(match.group(2) if len(match.groups()) > 1 else match.group(1))
+            detail_msg = f" {max_len}"
+        else:
+            detail_msg = " 258048"  # fallback default
+
+        error_type = "context_length_exceeded"
+        status = 400  # always 400 for this error, even if Qwen returned 502
+
+    # 6. Invalid Request / Bad Parameters
+    elif status == 400 or "invalid request" in combined or "bad request" in combined:
+        error_type = "invalid_request"
+        status = 400
+        if parsed_json and isinstance(parsed_json, dict):
+            detail_msg = parsed_json.get("message", "") or parsed_json.get("data", {}).get("details", "")
+
+    # 7. Timeout / Connection Issues
+    elif "timeout" in combined:
+        error_type = "network_timeout"
+        status = 504
+
+    # 8. General Internal Server Error - ONLY if nothing above worked
+    elif status >= 500 or "internal server error" in combined or "internal error" in combined:
+        error_type = "upstream_internal_error"
+        status = 502
+
+    # === RETRIEVE MESSAGE FROM CONFIG ===
+    cfg = Config.ERROR_MESSAGES.get(error_type, Config.ERROR_MESSAGES["unknown_error"])
+    # Build final message
+    message = cfg["message"]
+    if "{max_len}" in message:
+        max_val = detail_msg.strip() or "258048"
+        message = message.format(max_len=max_val)
+    elif detail_msg:
+        message = f"{message} {detail_msg}"
+
+    return {
+        "message": message,
+        "type": error_type,
+        "hint": cfg["hint"],
+        "status": status
+    }
+
 async def execute_qwen_completion(token_obj, chat_id, payload, on_chunk=None, is_new_chat: bool = False, request_timeout: Optional[float] = None):
     """
     Execute completion request to Qwen API with optimized retry logic.
@@ -1161,7 +1286,7 @@ async def execute_qwen_completion(token_obj, chat_id, payload, on_chunk=None, is
     start_time = time.time()  # Track total time for logging
 
     # =================================================================
-    # 🔥 ВНЕШНИЙ ЦИКЛ: Для быстрых сетевых ошибок (Connection Reset, 502, 503)
+    # 🔥 OUTER LOOP: For fast network errors (Connection Reset, 502, 503)
     # =================================================================
     for attempt in range(base_max_retries + 1):
         try:
@@ -1193,20 +1318,20 @@ async def execute_qwen_completion(token_obj, chat_id, payload, on_chunk=None, is
                         logger.error(f"❌ Qwen 400 error body (raw): {body[:300]}")
 
                     # =================================================================
-                    # 🔥 СПЕЦОБРАБОТКА: "The chat is in progress!" (Блокировка сессии)
-                    # Это НЕ сетевая ошибка, это сигнал "ЖДИ".
-                    # Запускаем НЕЗАВИСИМЫЙ внутренний цикл пинга.
+                    # 🔥 SPECIAL PROCESSING: "The chat is in progress!" (Session lock)
+                    # This is NOT a network error, it is a "WAIT" signal.
+                    # We start an INDEPENDENT internal ping loop.
                     # =================================================================
                     is_chat_in_progress = "chat is in progress" in error_details
 
                     if is_chat_in_progress:
                         logger.warning(f"🔒 Chat locked! Starting independent wait loop (ping)...")
 
-                        # 🔥 ВНУТРЕННИЙ ЦИКЛ: 6 попыток ждать, независимо от base_max_retries
-                        # Это тот самый "пинг чата", о котором ты говорил.
+                        # 🔥 INNER LOOP: 6 attempts to wait, regardless of base_max_retries
+                        # This is the "chat ping".
                         for lock_attempt in range(6):
                             if lock_attempt > 0:
-                                # Экспоненциальная задержка для "пинга"
+                                # Exponential backoff for "ping"
                                 if lock_attempt == 1: delay = 30.0
                                 elif lock_attempt == 2: delay = 45.0
                                 elif lock_attempt == 3: delay = 60.0
@@ -1217,7 +1342,7 @@ async def execute_qwen_completion(token_obj, chat_id, payload, on_chunk=None, is
                                 logger.warning(f"⏳ Waiting {delay}s before ping retry {lock_attempt+1}/6...")
                                 await asyncio.sleep(delay)
 
-                            # ПОВТОРНЫЙ ЗАПРОС внутри цикла ожидания
+                            # REQUEST AGAINST LOOP
                             try:
                                 async with http_client.stream(
                                     "POST",
@@ -1238,26 +1363,26 @@ async def execute_qwen_completion(token_obj, chat_id, payload, on_chunk=None, is
 
                                         if "chat is in progress" in retry_err:
                                             logger.warning(f"🔒 Still locked. Attempt {lock_attempt+1}/6 failed.")
-                                            continue # Идем на следующую паузу
+                                            continue # Let's go to the next break
                                         else:
-                                            # Другая ошибка - прерываем цикл блокировки и возвращаем ошибку
+                                            # Another error - we break the lock cycle and return an error
                                             logger.error(f"❌ New error during lock wait: {retry_status}")
                                             return {"success": False, "status": retry_status, "error": "API Error", "details": retry_body}
                                     else:
-                                        # Успех! Чат освободился.
+                                        # Success! The chat is free.
                                         logger.info(f"✅ Chat unlocked after {lock_attempt+1} waits!")
-                                        # Передаем управление на обработку стрима успешного ответа
+                                        # We transfer control to processing the successful response stream.
                                         return await _process_stream_response(retry_response, chat_id, start_time, on_chunk)
                             except Exception as e:
                                 logger.error(f"Error during lock retry: {e}")
                                 continue
 
-                        # Если цикл закончился, а чат все еще занят
+                        # If the cycle ends and the chat is still busy
                         elapsed = time.time() - start_time
                         logger.error(f"❌ Chat still in progress after 6 pings ({elapsed/60:.1f} min)")
                         return {"success": False, "status": actual_status, "error": "Chat locked after max retries", "details": body}
 
-                    # Стандартные ошибки 400/500 (не блокировка чата)
+                    # Standard 400/500 errors (not chat blocking)
                     if actual_status in (400, 500) and attempt < base_max_retries:
                         retry_delay = 1.0 if is_new_chat else 0.5
                         logger.warning(f"🔁 Retry {attempt+1}/{base_max_retries} (standard error, delay={retry_delay}s)")
@@ -1268,13 +1393,13 @@ async def execute_qwen_completion(token_obj, chat_id, payload, on_chunk=None, is
                     logger.error(f"❌ Failed after {elapsed:.1f}s: chat {chat_id[:8]}... returned {actual_status}")
                     return {"success": False, "status": actual_status, "error": "API Error", "details": body}
 
-                # Если статус OK (200), обрабатываем стрим
+                # If the status is OK (200), we process the stream.
                 if response.status_code != 200:
                     body = (await response.aread()).decode("utf-8", errors="ignore")
                     logger.error(f"❌ HTTP {response.status_code} from Qwen: {body[:500]}")
                     return {"success": False, "status": response.status_code, "error": "API Error", "details": body}
 
-                # Обработка SSE стрима
+                # Processing SSE stream
                 return await _process_stream_response(response, chat_id, start_time, on_chunk)
 
         except Exception as e:
@@ -1286,7 +1411,7 @@ async def execute_qwen_completion(token_obj, chat_id, payload, on_chunk=None, is
                 continue
             return {"success": False, "status": 500, "error": "Proxy error", "details": str(e)}
 
-    # Все попытки исчерпаны
+    # All attempts have been exhausted
     elapsed = time.time() - start_time
     logger.error(f"❌ Max retries exceeded after {elapsed:.1f}s ({elapsed/60:.1f} min) for chat {chat_id[:8]}...")
     return {
@@ -1296,69 +1421,109 @@ async def execute_qwen_completion(token_obj, chat_id, payload, on_chunk=None, is
         "details": "Failed after multiple attempts"
     }
 
-# =================================================================
-# 🔥 HELPER: Вынесли обработку стрима в отдельную функцию
-# Чтобы не дублировать огромный кусок кода внутри вложенного цикла
-# =================================================================
+# ==================================================================
+# 🔥 HELPER: Stream processing has been moved to a separate function
+# To avoid duplicating a huge chunk of code inside a nested loop
+# ==================================================================
 async def _process_stream_response(response, chat_id, start_time, on_chunk):
     """
     Helper function to process SSE stream from Qwen API.
     Used by both main request and retry loops.
+    
+    🔥 UPDATED: Errors are now handled via _format_user_error
+    for correct classification (including context_length_exceeded) and hints.
     """
     full_content = ""
     response_id = None
     usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
-
+    
     async for raw_line in response.aiter_lines():
         line = raw_line.strip()
         # Skip empty lines and non-data lines
-        if not line or not line.startswith(""):
+        if not line or not line.startswith("data:"):
             continue
+            
         data_str = line[5:].strip()  # Remove "data: " prefix
         if not data_str or data_str == "[DONE]":
             break
+            
         try:
             chunk = json.loads(data_str)
         except Exception:
             continue
 
-        # Handle rate limiting errors within stream
+        # =================================================================
+        # 🔥 Error Handling via _format_user_error
+        # =================================================================
+        
+        # 1. Rate limiting errors within stream
         if chunk.get("code") == "RateLimited" or (chunk.get("code") and chunk.get("detail")):
-            return {
+            # We format through the errors processor
+            formatted = _format_user_error({
                 "success": False,
                 "status": 429,
                 "error": "RateLimited",
                 "details": json.dumps(chunk, ensure_ascii=False)
-            }
-        # Handle generic errors within stream
-        if chunk.get("error") and not chunk.get("choices"):
+            })
             return {
                 "success": False,
-                "status": 500,
-                "error": "API Error",
+                "status": formatted["status"],
+                "error": formatted["type"],       # For example: rate_limit_exceeded
+                "message": formatted["message"],  # Message text
+                "hint": formatted.get("hint", ""),# Hint
                 "details": json.dumps(chunk, ensure_ascii=False)
             }
 
+        # 2. Generic errors within stream
+        if chunk.get("error") and not chunk.get("choices"):
+            # Extract details from the nested error structure, if any.
+            nested_error = chunk.get("error", {})
+            raw_details = json.dumps(nested_error, ensure_ascii=False) if isinstance(nested_error, dict) else json.dumps(chunk, ensure_ascii=False)
+            
+            # We format through the errors processor
+            formatted = _format_user_error({
+                "success": False,
+                "status": 500,
+                "error": "API Error",
+                "details": raw_details
+            })
+            return {
+                "success": False,
+                "status": formatted["status"],
+                "error": formatted["type"],       # For example: context_length_exceeded
+                "message": formatted["message"],  # Message text
+                "hint": formatted.get("hint", ""),# Hint
+                "details": raw_details
+            }
+
+        # =================================================================
+        # PROCESSING SUCCESSFUL CHUNKS
+        # =================================================================
+        
         # Extract response_id from metadata if present
         if chunk.get("response_id"):
             response_id = chunk["response_id"]
+            
         # Track token usage if provided
         if isinstance(chunk.get("usage"), dict):
             usage = chunk["usage"]
-
+            
         # Extract content from choices
         choices = chunk.get("choices")
         if not isinstance(choices, list) or not choices:
             continue
+            
         first_choice = choices[0] if isinstance(choices[0], dict) else {}
         delta = first_choice.get("delta") if isinstance(first_choice.get("delta"), dict) else {}
         piece = delta.get("content")
+        
         if piece is not None:
             piece_str = str(piece)
             full_content += piece_str
             # Call streaming callback if provided
             if callable(on_chunk):
                 on_chunk(piece_str)
+                
         # Check for stream completion
         if delta.get("status") == "finished" or first_choice.get("finish_reason"):
             break
@@ -1368,7 +1533,7 @@ async def _process_stream_response(response, chat_id, start_time, on_chunk):
         elapsed = time.time() - start_time
         if elapsed > 1.0:
              logger.info(f"✅ Success ({elapsed:.1f}s) for chat {chat_id[:8]}...")
-
+             
     return {
         "success": True,
         "content": full_content,
@@ -1390,7 +1555,7 @@ async def lifespan(app: FastAPI):
         app: FastAPI application instance
     """
     logger.info("FastAPI startup: initializing chat state backend...")
-    # 🔥 UPDATED: Init backend (handles File/Postgres/Fallback)
+    # 🔥 Init backend (handles File/Postgres/Fallback)
     await init_chat_state()
 
     # Show active mode
@@ -1399,7 +1564,7 @@ async def lifespan(app: FastAPI):
     else:
         logger.info(f"✅ ChatState backend initialized: {Config.CHAT_STATE_BACKEND.value}")
 
-    # Инициализация OpenWebUI DB (только для lookup)
+    # Initializing OpenWebUI DB (lookup only)
     logger.info("FastAPI startup: initializing asyncpg pool...")
     await init_db_pool()
 
@@ -1409,8 +1574,8 @@ async def lifespan(app: FastAPI):
     await http_client.aclose()
 
     # 🔥 Close backends
-    await close_chat_state()   # Закрывает State DB pool
-    await close_db_pool()      # Закрывает OpenWebUI DB pool
+    await close_chat_state()   # Closes the State DB pool
+    await close_db_pool()      # Closes the OpenWebUI DB pool
 
 # Create FastAPI application with lifespan management
 app = FastAPI(title="FreeQwenApi Python", lifespan=lifespan)
@@ -1477,23 +1642,35 @@ async def _stream_openai_response(token_info, chat_id: str, payload: Dict[str, A
                     try:
                         result = task.result()
                         if not result.get("success"):
-                            err_text = f"Error: {result.get('error', 'API Error')}"
-                            logger.warning(f"📡 Sending error chunk: {err_text[:100]}...")
+                            formatted = _format_user_error(result)
+                
+                            # ✅ Forming the text: Message + Hint (if any)
+                            # All this will be treated as regular content, and the interface will display it as bot text, properly TTS talk.
+                            full_text = formatted["message"]
+                            if formatted.get("hint"):
+                                full_text += f"\n\n{formatted['hint']}"
+                
+                            logger.warning(f"📡 Sending error as text: {full_text[:100]}...")
+                
+                            # ✅ We ship STRICTLY via delta.content
                             yield "data: " + json.dumps({
                                 "id": "chatcmpl-stream",
                                 "object": "chat.completion.chunk",
                                 "created": int(time.time()),
                                 "model": model,
-                                "choices": [{"index": 0, "delta": {"content": err_text}, "finish_reason": None}]
+                                "choices": [{"index": 0, "delta": {"content": full_text}, "finish_reason": None}]
                             }, ensure_ascii=False) + "\n\n"
+                
                     except Exception as e:
                         logger.error(f"📡 Error getting task result: {e}")
+                        # Fallback is also strictly like text.
+                        fallback_msg = Config.ERROR_MESSAGES.get("unknown_error", {}).get("message", "Check API Engine!")
                         yield "data: " + json.dumps({
                             "id": "chatcmpl-stream",
                             "object": "chat.completion.chunk",
                             "created": int(time.time()),
                             "model": model,
-                            "choices": [{"index": 0, "delta": {"content": f"Error: {str(e)}"}, "finish_reason": None}]
+                            "choices": [{"index": 0, "delta": {"content": fallback_msg}, "finish_reason": None}]
                         }, ensure_ascii=False) + "\n\n"
                 break
             # 🔥 Send ping chunk if no activity for PING_INTERVAL seconds
@@ -1627,7 +1804,6 @@ async def handle_chat_completions(request: Request, body: Dict[str, Any]):
     if Config.DEBUG_LOGGING:
         logger.debug(f"🔍 Processing: openweb_chat_id={openweb_chat_id}, incoming_parent_id={incoming_parent_id}, model={mapped_model}")
 
-    # 🔥 REMOVED: Lazy-load logic from JSON file.
     # Backend handles persistence automatically.
 
     # Get backend instance
@@ -1637,7 +1813,7 @@ async def handle_chat_completions(request: Request, body: Dict[str, Any]):
     state = await backend.get(openweb_chat_id)
     is_new_chat = state is None or not state.qwen_chat_id
 
-    # 🔥 FIX: Increase timeout for large messages in new chats
+    # 🔥 Increase timeout for large messages in new chats
     request_timeout = Config.HTTP_TIMEOUT
     content_size = len(str(message_content)) if message_content else 0
     if is_new_chat and content_size > 5000:
@@ -1649,29 +1825,29 @@ async def handle_chat_completions(request: Request, body: Dict[str, Any]):
         return JSONResponse(status_code=500, content={"error": "Failed to get or create chat in Qwen"})
 
     # =================================================================
-    # 🔥 FIX: ГИБКАЯ ОБРАБОТКА parent_id (модель-специфичная, настраиваемая через config/.env)
+    # 🔥 FLEXIBLE parent_id handling (model-specific, configurable via config/.env)
     # =================================================================
     effective_parent_id = None
 
     if state and state.qwen_chat_id:
-        # 🔥 Логика выбора parent_id в зависимости от модели (из Config)
+        # 🔥 Logic for selecting parent_id depending on the model (from Config)
         if mapped_model in Config.MODELS_REQUIRING_PARENT_ID:
-            # Эти модели требуют parent_id для продолжения диалога
+            # These models require a parent_id to continue the conversation.
             effective_parent_id = state.last_parent_id
             if Config.DEBUG_LOGGING:
                 logger.debug(f"📌 Model {mapped_model} REQUIRES parent_id: {effective_parent_id[:8] if effective_parent_id else None}")
         elif mapped_model in Config.MODELS_WORKING_WITHOUT_PARENT_ID:
-            # Эти модели строят историю внутри chat_id автоматически
+            # These models build history inside chat_id automatically
             effective_parent_id = None
             if Config.DEBUG_LOGGING:
                 logger.debug(f"📌 Model {mapped_model} works WITHOUT parent_id (auto-history)")
         else:
-            # Неизвестная модель: пробуем с parent_id (более безопасный дефолт)
+            # Unknown model: try with parent_id (safer default)
             effective_parent_id = state.last_parent_id
             if Config.DEBUG_LOGGING:
                 logger.debug(f"📌 Model {mapped_model} UNKNOWN: trying WITH parent_id (safe default)")
     else:
-        # Новый чат: всегда parent_id=None для первого сообщения
+        # New chat: always parent_id=None for first message
         effective_parent_id = None
 
     if Config.DEBUG_LOGGING:
@@ -1703,11 +1879,30 @@ async def handle_chat_completions(request: Request, body: Dict[str, Any]):
         request_timeout=request_timeout
     )
     if not result.get("success"):
-        status = result.get("status") or 500
-        if not isinstance(status, int) or status < 400:
-            status = 500
-        return JSONResponse(status_code=status, content={"error": {"message": result.get("details") or result.get("error") or "API Error", "type": "upstream_error"}})
-
+        # Use new error formatting function
+        formatted = _format_user_error(result)
+    
+        # Log technical details for debugging (not exposed to user)
+        logger.warning(
+            f"⚠️ Error for chat {qwen_chat_id[:8] if qwen_chat_id else 'N/A'}: "
+            f"type={formatted['type']}, status={formatted['status']}, "
+            f"message={formatted['message']}, hint={formatted.get('hint', '')}"
+        )
+        if Config.DEBUG_LOGGING:
+            logger.debug(f"🔍 Raw error details: {result.get('details', '')[:500]}")
+    
+        # Build response for user
+        error_response = {
+            "error": {
+                "message": formatted["message"],
+                "type": formatted["type"]
+            }
+        }
+        if formatted.get("hint"):
+            error_response["error"]["hint"] = formatted["hint"]
+    
+        return JSONResponse(status_code=formatted["status"], content=error_response)
+    
     # Update parent_id mapping after successful response
     response_id = result.get("response_id")
     if response_id and openweb_chat_id:
