@@ -484,7 +484,26 @@ def edit_image():
         if not image_url:
             # Try get model text answer if no image edit result link
             try:
-                messages = driver.find_elements(By.CSS_SELECTOR, "div[class*='message-content'], div[class*='markdown-body'], span[class*='qwen-markdown-text']")
+                # At first we try find answer containers
+                response_divs = driver.find_elements(By.CSS_SELECTOR, "div.qwen-response-message")
+
+                if response_divs:
+                    # Extract all visible text from last message
+                    fallback_text = response_divs[-1].get_attribute("innerText").strip()
+
+                    if fallback_text:
+                        return jsonify({
+                            "error": "Failed to retrieve image URL from DOM.",
+                            "note": "Navigation succeeded, but image not found.",
+                            "qwen_message": fallback_text
+                        }), 500
+
+                # Fallback: if container not found, try old selectors
+                messages = driver.find_elements(By.CSS_SELECTOR,
+                    "div[class*='message-content'], "
+                    "div[class*='markdown-body'], "
+                    "span[class*='qwen-markdown-text']")
+
                 if messages:
                     fallback_text = messages[-1].text.strip()
                     if fallback_text:
@@ -493,13 +512,9 @@ def edit_image():
                             "note": "Navigation succeeded, but image not found.",
                             "qwen_message": fallback_text
                         }), 500
+
             except Exception:
                 pass
-
-            return jsonify({
-                "error": "Failed to retrieve image URL from DOM.",
-                "note": "Navigation succeeded, but image not found."
-            }), 500
 
         # Download and encode result image
         b64_result = download_and_encode_image(image_url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36"})
