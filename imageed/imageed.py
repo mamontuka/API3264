@@ -251,6 +251,12 @@ def extract_image_url_from_chat(driver, timeout=None):
         debug_log(f"Found {len(images)} image(s).")
         if images:
             url = images[-1].get_attribute("src")
+
+            # URL cleanup: remove OSS resize parameters, for get original full size image result
+            if url and "&x-oss-process=" in url:
+                url = url.split("&x-oss-process=", 1)[0]
+                debug_log(f"Cleaned URL from resize params.")
+
             debug_log(f"Last image src: {url[:100]}...")
             # Validate URL format
             if url and url.startswith("https://cdn.qwenlm.ai/"):
@@ -515,6 +521,11 @@ def edit_image():
 
             except Exception:
                 pass
+
+            return jsonify({
+                "error": "Failed to retrieve image URL from DOM.",
+                "note": "Navigation succeeded, but image not found."
+            }), 500
 
         # Download and encode result image
         b64_result = download_and_encode_image(image_url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36"})
