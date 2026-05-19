@@ -480,7 +480,22 @@ def edit_image():
 
         # Extract image URL from DOM
         image_url = extract_image_url_from_chat(driver)
+
         if not image_url:
+            # Try get model text answer if no image edit result link
+            try:
+                messages = driver.find_elements(By.CSS_SELECTOR, "div[class*='message-content'], div[class*='markdown-body'], span[class*='qwen-markdown-text']")
+                if messages:
+                    fallback_text = messages[-1].text.strip()
+                    if fallback_text:
+                        return jsonify({
+                            "error": "Failed to retrieve image URL from DOM.",
+                            "note": "Navigation succeeded, but image not found.",
+                            "qwen_message": fallback_text
+                        }), 500
+            except Exception:
+                pass
+
             return jsonify({
                 "error": "Failed to retrieve image URL from DOM.",
                 "note": "Navigation succeeded, but image not found."
