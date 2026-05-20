@@ -522,10 +522,10 @@ def edit_image():
             except Exception:
                 pass
 
-            return jsonify({
-                "error": "Failed to retrieve image URL from DOM.",
-                "note": "Navigation succeeded, but image not found."
-            }), 500
+#            return jsonify({
+#                "error": "Failed to retrieve image URL from DOM.",
+#                "note": "Navigation succeeded, but image not found."
+#            }), 500
 
         # Download and encode result image
         b64_result = download_and_encode_image(image_url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36"})
