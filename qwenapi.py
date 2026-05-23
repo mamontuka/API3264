@@ -77,6 +77,11 @@ from chat.models import load_available_models
 # Import auth browser for CLI
 from auth.browser import login_interactive
 
+# Import token factory
+from token_backends.factory import init_token_storage, close_token_storage, get_token_backend
+
+_args = None
+
 # =================================================================
 # INITIALIZATION
 # =================================================================
@@ -116,9 +121,10 @@ async def lifespan(app: FastAPI):
     Args:
         app: FastAPI application instance
     """
-    logger.info("FastAPI startup: initializing chat state backend...")
+    logger.info("FastAPI startup: initializing backends...")
     # 🔥 Init backend (handles File/Postgres/Fallback)
     await init_chat_state()
+    await init_token_storage()
 
     # Show active mode
     if is_fallback_active():
@@ -130,12 +136,22 @@ async def lifespan(app: FastAPI):
     logger.info("FastAPI startup: initializing asyncpg pool...")
     await init_db_pool()
 
+    # Processing --clear-tokens
+    if _args and _args.clear_tokens:
+        try:
+            backend = get_token_backend()
+            await backend.clear()
+            logger.info("🧹 Tokens cleared on startup via --clear-tokens")
+        except Exception as e:
+            logger.warning(f"Clear tokens failed: {e}")
+
     yield
 
     logger.info("FastAPI shutdown: cleaning up resources...")
     await http_client.aclose()
 
     # 🔥 Close backends
+    await close_token_storage()# Closes the Token DB pool
     await close_chat_state()   # Closes the State DB pool
     await close_db_pool()      # Closes the OpenWebUI DB pool
 
@@ -324,6 +340,7 @@ def parse_args():
 if __name__ == "__main__":
     # Entry point when run as script
     args = parse_args()
+    _args = args  # Save for lifespan
     if args.login:
         import asyncio
         asyncio.run(login_interactive(email=args.email, password=args.password, clear_existing=args.clear_tokens))

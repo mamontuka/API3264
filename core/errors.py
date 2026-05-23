@@ -152,9 +152,14 @@ def _format_user_error(result: Dict[str, Any]) -> Dict[str, Any]:
         message = message.format(max_len=max_val)
     elif detail_msg:
         message = f"{message} {detail_msg}"
+
+    # 🔧 CONDITIONAL HINT LOGIC
+    # Return hint only if enabled in config, otherwise return empty string
+    hint_value = cfg["hint"] if Config.ERROR_HINTS_ENABLED else ""
+
     return {
         "message": message,
         "type": error_type,
-        "hint": cfg["hint"],
+        "hint": hint_value,
         "status": status
     }

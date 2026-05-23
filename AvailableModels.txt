@@ -1,3 +1,8 @@
+qwen3.7-max
+qwen3.7-max-preview
+qwen3.7-plus-preview
+qwen-latest-series-invite-beta-v16
+qwen-latest-series-invite-beta-v24
 qwen3.6-plus
 qwen3.6-plus-preview
 qwen3.6-max-preview

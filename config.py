@@ -45,6 +45,10 @@ class ChatStateBackendType(str, Enum):
     FILE = "file"
     POSTGRES = "postgres"
 
+class TokenBackendType(str, Enum):
+    FILE = "file"
+    POSTGRES = "postgres"
+
 # =================================================================
 # BASE CONFIGURATION
 # =================================================================
@@ -66,13 +70,15 @@ class Config:
     CHAT_MAPPING_FILE: Path = SESSION_DIR / "chat_mapping.json"
     AVAILABLE_MODELS_FILE: Path = SCRIPT_DIR / "AvailableModels.txt"
     # 🔥 Default model and mapping
-    DEFAULT_MODEL: str = os.getenv("DEFAULT_MODEL", "qwen-max-latest")
+    DEFAULT_MODEL: str = os.getenv("DEFAULT_MODEL", "qwen3.5-max")
     MODEL_MAPPING: Dict[str, str] = {
+        "qwen3.7-max": "qwen3.7-max",
+        "qwen3.7-plus-preview": "qwen-latest-series-invite-beta-v16",
+        "qwen3.7-max-preview": "qwen-latest-series-invite-beta-v24",
         "qwen3.6": "qwen3.6-plus",
         "qwen3.6-max": "qwen3.6-max-preview",
         "qwen3.5": "qwen3.5-plus",
         "qwen3.5-max": "qwen3.5-max-2026-03-08",
-        "qwen-max-latest": "qwen3-max",
         "qwen-vl": "qwen3-vl-235b-a22b",
         "qwen3-coder": "qwen3-coder-plus",
         "qwen3": "qwen3-235b-a22b",
@@ -86,6 +92,9 @@ class Config:
     MODELS_REQUIRING_PARENT_ID = os.getenv(
         "QWEN_MODELS_REQUIRING_PARENT_ID",
         (
+            "qwen3.7-max,"
+            "qwen-latest-series-invite-beta-v16,"
+            "qwen-latest-series-invite-beta-v24,"
             "qwen3.6-plus,"
             "qwen3.6-plus-preview,"
             "qwen3.6-max-preview,"
@@ -155,6 +164,26 @@ class Config:
     CHAT_STATE_DB_POOL_MIN: int = int(os.getenv("CHAT_STATE_DB_POOL_MIN", "2"))
     CHAT_STATE_DB_POOL_MAX: int = int(os.getenv("CHAT_STATE_DB_POOL_MAX", "10"))
 
+    # 🔥 TOKENS BACKEND CONFIGURATION
+    # Backend select: file, postgres
+    _TOKEN_RAW: str = os.getenv("TOKEN_STORAGE_BACKEND", "file").lower()
+    try:
+        TOKEN_STORAGE_BACKEND: TokenBackendType = TokenBackendType(_TOKEN_RAW)
+    except ValueError:
+        raise ValueError(f"Wrong TOKEN_STORAGE_BACKEND='{_TOKEN_RAW}'. Correct values: 'file', 'postgres'.")
+
+    # 🔥 INDEPENDENT DATABASE FOR TOKENS
+    # Dont have any relations with OPENWEBUI_DB_*
+    TOKEN_DB_HOST: str = os.getenv("TOKEN_DB_HOST", "localhost")
+    TOKEN_DB_PORT: int = int(os.getenv("TOKEN_DB_PORT", "5432"))
+    TOKEN_DB_NAME: str = os.getenv("TOKEN_DB_NAME", "api3264_tokens")
+    TOKEN_DB_USER: str = os.getenv("TOKEN_DB_USER", "freeqwenapi")
+    TOKEN_DB_PASSWORD: str = os.getenv("TOKEN_DB_PASSWORD", "freeqwenapi")
+    TOKEN_DB_TABLE: str = os.getenv("TOKEN_DB_TABLE", "tokens")
+    TOKEN_DB_SSL_MODE: str = os.getenv("TOKEN_DB_SSL_MODE", "prefer")
+    TOKEN_DB_POOL_MIN: int = int(os.getenv("TOKEN_DB_POOL_MIN", "2"))
+    TOKEN_DB_POOL_MAX: int = int(os.getenv("TOKEN_DB_POOL_MAX", "10"))
+
     # ===========================================================================
     # ERROR MESSAGES CONFIGURATION
     # ===========================================================================
@@ -162,6 +191,9 @@ class Config:
     # Supports three languages with TTS language tags: EN, RU, UA.
     # Override any message via environment variables in .env file.
     # ===========================================================================
+
+    # 🔧 Flag to enable/disable error hints globally
+    ERROR_HINTS_ENABLED: bool = os.getenv("ERROR_HINTS_ENABLED", "true").lower() in ("true", "1", "yes", "on")
 
     ERROR_MESSAGES = {
         "rate_limit_exceeded": {

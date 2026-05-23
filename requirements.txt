@@ -50,7 +50,7 @@ python-dotenv>=1.0.0,<2.0.0
 # =================================================================
 
 # 🔥 PostgreSQL support for OpenWebUI integration
-# psycopg2-binary>=2.9.9,<3.0.0
+ psycopg2-binary>=2.9.9,<3.0.0
 
 # 🔥 ASYNC DATABASE DRIVER (replaces psycopg2)
 # Native async driver for PostgreSQL - no Event Loop blocking

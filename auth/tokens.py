@@ -28,18 +28,35 @@ Token management, round-robin, rate limiting.
 import json
 import time
 import logging
+import asyncio
+import concurrent.futures
 from datetime import datetime
 from typing import List, Dict, Optional
 
 from config import Config
+
+from token_backends.factory import get_token_backend
+from token_backends.base import TokenData
 
 logger = logging.getLogger(__name__)
 
 # Global pointer for round-robin token selection
 _pointer = 0
 
+def _run_async(coro):
+    """Safe co-routine start from synchronous code"""
+    try:
+        loop = asyncio.get_running_loop()
+        # Мы внутри цикла (FastAPI). Запускаем в отдельном потоке.
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            future = executor.submit(asyncio.run, coro)
+            return future.result()
+    except RuntimeError:
+        # No cycle (CLI/Tests). Can start directly.
+        return asyncio.run(coro)
 
-def load_tokens():
+
+def load_tokens() -> List[Dict]:
     """
     Load authentication tokens from persistent storage.
     Tokens are stored as a list of dictionaries with structure:
@@ -54,18 +71,16 @@ def load_tokens():
     Returns:
         List[Dict]: List of token dictionaries, or empty list if file missing/error
     """
-    Config.ensure_dirs()
-    if not Config.TOKENS_FILE.exists():
-        return []
     try:
-        with open(Config.TOKENS_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
+        backend = get_token_backend()
+        tokens = _run_async(backend.load_all())
+        return [t.to_dict() for t in tokens]
     except Exception as e:
-        logger.error(f"Error loading {Config.TOKENS_FILE}: {e}")
+        logger.error(f"load_tokens error: {e}")
         return []
 
 
-def save_tokens(tokens):
+def save_tokens(tokens_list: List[Dict]):
     """
     Save authentication tokens to persistent storage.
     Args:
@@ -74,15 +89,15 @@ def save_tokens(tokens):
         - Writes tokens to Config.TOKENS_FILE (overwrites existing)
         - Logs errors if save fails
     """
-    Config.ensure_dirs()
     try:
-        with open(Config.TOKENS_FILE, "w", encoding="utf-8") as f:
-            json.dump(tokens, f, indent=2, ensure_ascii=False)
+        backend = get_token_backend()
+        tokens = [TokenData.from_dict(t) for t in tokens_list]
+        _run_async(backend.save_all(tokens))
     except Exception as e:
-        logger.error(f"Error saving {Config.TOKENS_FILE}: {e}")
+        logger.error(f"save_tokens error: {e}")
 
 
-def get_available_token():
+def get_available_token() -> Optional[Dict]:
     """
     Get next available authentication token using round-robin selection.
     Filters out:
@@ -93,18 +108,16 @@ def get_available_token():
     """
     global _pointer
     tokens = load_tokens()
-    now = time.time() * 1000  # Convert to milliseconds for comparison
-    # Filter: keep only tokens that are valid and not currently rate-limited
+    now = time.time() * 1000
     valid = [t for t in tokens if not t.get('invalid') and (not t.get('resetAt') or datetime.fromisoformat(t['resetAt'].replace('Z', '+00:00')).timestamp() * 1000 <= now)]
     if not valid:
         return None
-    # Round-robin: select next token and advance pointer
     token_obj = valid[_pointer % len(valid)]
     _pointer = (_pointer + 1) % len(valid)
     return token_obj
 
 
-def mark_rate_limited(token_id, hours=24):
+def mark_rate_limited(token_id: str, hours: int = 24):
     """
     Mark a token as rate-limited, preventing its use until reset time.
     Args:
@@ -117,8 +130,7 @@ def mark_rate_limited(token_id, hours=24):
     tokens = load_tokens()
     for t in tokens:
         if t['id'] == token_id:
-            # Calculate reset time: now + specified hours
             reset_time = datetime.fromtimestamp(time.time() + hours * 3600)
-            t['resetAt'] = reset_time.isoformat() + "Z"  # ISO format with Z suffix
+            t['resetAt'] = reset_time.isoformat() + "Z"
             break
     save_tokens(tokens)

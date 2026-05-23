@@ -20,11 +20,6 @@
 #
 # You should have received a copy of the GNU General Public License
 # along with this program. If not, see <https://www.gnu.org/>.
-#
-#
 
-flask
-selenium
-requests
-python-dotenv
-psycopg2-binary
+# token_backends/__init__.py
+# FreeQwenApi Tokens Module
