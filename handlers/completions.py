@@ -210,6 +210,8 @@ async def _stream_openai_response(token_info, chat_id: str, payload: Dict[str, A
 
         # Update parent_id mapping for next message in conversation
         if response_id and openweb_chat_id:
+            if Config.PARENT_ID_UPDATE_DELAY > 0:
+                await asyncio.sleep(Config.PARENT_ID_UPDATE_DELAY)
             await update_chat_parent_id(openweb_chat_id, response_id)
             logger.debug(f"📡 Updated last_parent_id for {openweb_chat_id[:8]}...: {response_id[:8]}...")
 
@@ -260,6 +262,14 @@ async def handle_chat_completions(request: Request, body: Dict[str, Any]):
     messages = _extract_messages(body)
     if not messages:
         return JSONResponse(status_code=400, content={"error": "Messages not specified"})
+
+    # ✅ CHECKING TOOL CALL
+    # If the request body contains tool_calls, then OpenWebUI has executed the tool
+    # and is sending the result/continuation. We're adding a pause to sync with Qwen.
+    if body.get("tool_calls"):
+        logger.debug("🔧 Detected tool_calls in request body, adding delay...")
+        if Config.TOOL_CALL_SYNC_DELAY > 0:
+            await asyncio.sleep(Config.TOOL_CALL_SYNC_DELAY)
 
     # Extract and map model name
     model = body.get("model", Config.DEFAULT_MODEL)

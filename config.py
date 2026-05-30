@@ -184,6 +184,13 @@ class Config:
     TOKEN_DB_POOL_MIN: int = int(os.getenv("TOKEN_DB_POOL_MIN", "2"))
     TOKEN_DB_POOL_MAX: int = int(os.getenv("TOKEN_DB_POOL_MAX", "10"))
 
+    # 🔧 DELAYS CONFIGURATION
+    # Delay before updating parent_id after stream ends (seconds)
+    PARENT_ID_UPDATE_DELAY = float(os.getenv("PARENT_ID_UPDATE_DELAY", "1.5"))
+    
+    # Delay in processing tool_calls for synchronization with the API (seconds)
+    TOOL_CALL_SYNC_DELAY = float(os.getenv("TOOL_CALL_SYNC_DELAY", "1.5"))
+
     # ===========================================================================
     # ERROR MESSAGES CONFIGURATION
     # ===========================================================================
