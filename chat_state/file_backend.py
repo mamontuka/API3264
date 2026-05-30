@@ -40,11 +40,18 @@ logger = logging.getLogger("FreeQwenApi")
 
 
 class FileBackend(ChatStateBackend):
+    """
+    File-based implementation of ChatStateBackend.
+    Stores chat mappings in a JSON file with atomic write operations.
+    Thread-safe via internal lock.
+    """
+
     def __init__(self, file_path: Path):
         self.file_path = file_path
         self._lock = asyncio.Lock()
         self._data: dict[str, dict] = {}
 
+    """Load existing state from file if present."""
     def _get_file_path(self, openweb_id: str, model: Optional[str] = None) -> Path:
         """Generates a file path based on the model."""
         key = self._make_key(openweb_id, model)
@@ -52,6 +59,7 @@ class FileBackend(ChatStateBackend):
         return self.file_path.parent / f"{safe_key}.json"
 
     async def init(self) -> bool:
+        # Ensure parent directory exists
         try:
             self.file_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -59,10 +67,12 @@ class FileBackend(ChatStateBackend):
                 async with self._lock:
                     with open(self.file_path, "r", encoding="utf-8") as f:
                         loaded = json.load(f)
+                        # Convert dict format to internal structure
                         for key, value in loaded.items():
                             if isinstance(value, dict):
                                 self._data[key] = value
                             else:
+                                # Legacy format fallback
                                 self._data[key] = {
                                     "qwen_chat_id": value,
                                     "last_parent_id": None,
@@ -78,11 +88,13 @@ class FileBackend(ChatStateBackend):
             return False
 
     async def close(self):
+        """Save state and release resources."""
         await self._save()
         self._data.clear()
         logger.debug("💾 FileBackend closed")
 
     async def _save(self):
+        """Atomic save to file."""
         async with self._lock:
             try:
                 temp_file = str(self.file_path) + ".tmp"
@@ -152,6 +164,7 @@ class FileBackend(ChatStateBackend):
         return False
 
     async def health_check(self) -> bool:
+        """Check if file is writable."""
         try:
             self.file_path.parent.mkdir(parents=True, exist_ok=True)
             test_file = self.file_path.parent / ".write_test"
