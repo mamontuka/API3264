@@ -145,7 +145,7 @@ class Config:
     OPENWEBUI_DB_SSL_MODE: str = os.getenv("OPENWEBUI_DB_SSL_MODE", "prefer")
     OPENWEBUI_DB_CONNECT_TIMEOUT: int = int(os.getenv("OPENWEBUI_DB_CONNECT_TIMEOUT", "5"))
 
-    # 🔥 POSTRGES AUTO MIGRATION
+    # 🔥 POSTGRES AUTO MIGRATION
     # Select: true, false
     ENABLE_AUTO_MIGRATION: bool = os.getenv("ENABLE_AUTO_MIGRATION", "true").lower() in ("true", "1", "yes", "on")
 
