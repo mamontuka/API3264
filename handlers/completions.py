@@ -66,7 +66,7 @@ def _extract_messages(body: Dict[str, Any]) -> List[Dict[str, Any]]:
     return []
 
 
-async def _stream_openai_response(token_info, chat_id: str, payload: Dict[str, Any], model: str, openweb_chat_id: str):
+async def _stream_openai_response(token_info, chat_id: str, payload: Dict[str, Any], model: str, openweb_chat_id: str, mapped_model: str):
     """
     Streaming response generator in OpenAI-compatible SSE format.
     Implements Server-Sent Events (SSE) protocol for streaming token-by-token responses:
@@ -78,6 +78,7 @@ async def _stream_openai_response(token_info, chat_id: str, payload: Dict[str, A
         payload: Request payload for Qwen API
         model: Model name for response metadata
         openweb_chat_id: OpenWebUI chat ID for state updates
+        mapped_model: Mapped model name for state isolation
     Yields:
         str: SSE-formatted chunks for StreamingResponse
     """
@@ -209,11 +210,12 @@ async def _stream_openai_response(token_info, chat_id: str, payload: Dict[str, A
                 pass
 
         # Update parent_id mapping for next message in conversation
+        # 🔧 UPDATED: Pass mapped_model for model-isolated state
         if response_id and openweb_chat_id:
             if Config.PARENT_ID_UPDATE_DELAY > 0:
                 await asyncio.sleep(Config.PARENT_ID_UPDATE_DELAY)
-            await update_chat_parent_id(openweb_chat_id, response_id)
-            logger.debug(f"📡 Updated last_parent_id for {openweb_chat_id[:8]}...: {response_id[:8]}...")
+            await update_chat_parent_id(openweb_chat_id, response_id, model=mapped_model)
+            logger.debug(f"📡 Updated last_parent_id for {openweb_chat_id[:8]}... (model={mapped_model}): {response_id[:8]}...")
 
         # 🔥 FINAL CHUNKS: Also use correct SSE format
         logger.debug(f"📡 Sending final chunk for chat {chat_id[:8]}...")
@@ -317,8 +319,8 @@ async def handle_chat_completions(request: Request, body: Dict[str, Any]):
     from chat_state.factory import get_chat_state_backend
     backend = get_chat_state_backend()
 
-    # Check if chat exists via backend
-    state = await backend.get(openweb_chat_id)
+    # 🔧 UPDATED: Get state with model isolation
+    state = await backend.get(openweb_chat_id, model=mapped_model)
     is_new_chat = state is None or not state.qwen_chat_id
 
     # 🔥 Increase timeout for large messages in new chats
@@ -375,8 +377,9 @@ async def handle_chat_completions(request: Request, body: Dict[str, Any]):
             "X-Accel-Buffering": "no",  # 🔥 Important for nginx proxy buffering
             "Content-Type": "text/event-stream",
         }
+        # 🔧 UPDATED: Pass mapped_model to streaming handler for state isolation
         return StreamingResponse(
-            _stream_openai_response(token_info, qwen_chat_id, payload, mapped_model, openweb_chat_id),
+            _stream_openai_response(token_info, qwen_chat_id, payload, mapped_model, openweb_chat_id, mapped_model),
             media_type="text/event-stream",
             headers=headers
         )
@@ -416,12 +419,14 @@ async def handle_chat_completions(request: Request, body: Dict[str, Any]):
         return JSONResponse(status_code=formatted["status"], content=error_response)
 
     # Update parent_id mapping after successful response
+    # 🔧 UPDATED: Pass mapped_model for model-isolated state update
     response_id = result.get("response_id")
     if response_id and openweb_chat_id:
-        await update_chat_parent_id(openweb_chat_id, response_id)
+        await update_chat_parent_id(openweb_chat_id, response_id, model=mapped_model)
         if Config.DEBUG_LOGGING:
-            logger.debug(f"Updated last_parent_id for {openweb_chat_id[:8]}...: {response_id[:8]}...")
+            logger.debug(f"Updated last_parent_id for {openweb_chat_id[:8]}... (model={mapped_model}): {response_id[:8]}...")
 
     # Build and return OpenAI-compatible response
     response_parent_id = response_id or incoming_parent_id
     return _build_openai_completion(result.get("content", ""), model, qwen_chat_id, response_parent_id, usage=result.get("usage"))
+    

@@ -26,7 +26,7 @@
 import logging
 from typing import Optional
 from config import Config, ChatStateBackendType
-from .base import ChatStateBackend
+from .base import ChatStateBackend, ChatStateData
 from .file_backend import FileBackend
 from .pg_backend import PostgresBackend
 from .db_client import init_state_db_pool, close_state_db_pool
@@ -43,7 +43,6 @@ async def _create_and_init_backend(backend_type: ChatStateBackendType) -> Option
 
         if backend_type == ChatStateBackendType.POSTGRES:
             logger.info("🗄 Initialization ChatState: PostgreSQL")
-            # Init pool first
             pool = await init_state_db_pool()
             if pool is None:
                 logger.error("❌ Failed creating connection pool for PostgreSQL.")
@@ -51,7 +50,6 @@ async def _create_and_init_backend(backend_type: ChatStateBackendType) -> Option
 
             backend = PostgresBackend(table=Config.CHAT_STATE_DB_TABLE)
 
-            # Critical: check DB health before use
             if not await backend.health_check():
                 logger.error("❌ Failed PostgreSQL health check.")
                 return None
@@ -60,7 +58,6 @@ async def _create_and_init_backend(backend_type: ChatStateBackendType) -> Option
             logger.info("💾 Initialization ChatState: File")
             backend = FileBackend(Config.CHAT_STATE_FILE)
 
-        # Overall initialization
         success = await backend.init()
         if not success:
             logger.error(f"❌ Error backend initialization {backend_type}.")
@@ -87,7 +84,6 @@ async def init_chat_state() -> ChatStateBackend:
         logger.info(f"✅ ChatState successful started in mode: {target_mode.value}")
         return _backend
 
-    # Fallback logic
     if target_mode == ChatStateBackendType.POSTGRES:
         logger.warning("⚠️ PostgreSQL not available. Crash switch to file mode...")
         fallback_backend = await _create_and_init_backend(ChatStateBackendType.FILE)
@@ -95,13 +91,12 @@ async def init_chat_state() -> ChatStateBackend:
         if fallback_backend is not None:
             _backend = fallback_backend
             _fallback_active = True
-            logger.warning("✅ ChatState wirks in crash file mode.")
+            logger.warning("✅ ChatState works in crash file mode.")
             return _backend
         else:
             logger.critical("💀 Critical error: BOTH MODES - PostgreSQL AND file NOT WORK!.")
             raise RuntimeError("Failed to initialize any chat state backend. System cannot start.")
     else:
-        # If file mode dont start its critical
         logger.critical("💀 File mode critical error.")
         raise RuntimeError("Failed to initialize file chat state backend.")
 
@@ -112,7 +107,6 @@ async def close_chat_state():
         _backend = None
         _fallback_active = False
 
-    # Close pool
     await close_state_db_pool()
 
 def get_chat_state_backend() -> ChatStateBackend:
@@ -123,3 +117,62 @@ def get_chat_state_backend() -> ChatStateBackend:
 def is_fallback_active() -> bool:
     """Return True, if system works in fallback mode."""
     return _fallback_active
+
+
+# =============================================================================
+# 🔧 GLOBAL HELPERS WITH ISOLATION SUPPORT BY MODELS
+# =============================================================================
+
+async def get_chat_state(openweb_id: str, model: Optional[str] = None) -> Optional[ChatStateData]:
+    """
+    Get chat state with model-based isolation support.
+    
+    Args:
+        openweb_id: OpenWebUI chat ID
+        model: State isolation model (optional).
+               If specified, the composite key openweb_id:model will be used.
+               If not specified, the base key is used (backward compatibility).
+    
+    Returns:
+        ChatStateData or None if the state is not found.
+    """
+    backend = get_chat_state_backend()
+    return await backend.get(openweb_id, model=model)
+
+
+async def set_chat_state(openweb_id: str, data: ChatStateData, model: Optional[str] = None):
+    """
+    Save chat state with model isolation support.
+    
+    Args:
+        openweb_id: OpenWebUI chat ID
+        data: State data
+        model: Insulation model (optional)
+    """
+    backend = get_chat_state_backend()
+    await backend.set(openweb_id, data, model=model)
+
+
+async def update_chat_parent_id(openweb_id: str, parent_id: str, model: Optional[str] = None):
+    """
+    Update last_parent_id with model isolation support.
+    
+    Args:
+        openweb_id: OpenWebUI chat ID
+        parent_id: New parent_id
+        model: Insulation model (optional)
+    """
+    backend = get_chat_state_backend()
+    await backend.update_parent(openweb_id, parent_id, model=model)
+
+
+async def delete_chat_state(openweb_id: str, model: Optional[str] = None):
+    """
+    Remove chat state with model isolation support.
+    
+    Args:
+        openweb_id: OpenWebUI chat ID
+        model: Insulation model (optional)
+    """
+    backend = get_chat_state_backend()
+    await backend.delete(openweb_id, model=model)

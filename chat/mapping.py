@@ -227,7 +227,7 @@ async def get_or_create_qwen_chat(token_obj, openweb_chat_id: str, model: str):
     # Get backend instance
     backend = get_chat_state_backend()
     # Check if we already have a mapping for this OpenWebUI chat
-    state = await backend.get(openweb_chat_id)
+    state = await backend.get(openweb_chat_id, model=model)
     if state and state.qwen_chat_id:
         logger.debug(f"Found existing chat: {openweb_chat_id} -> {state.qwen_chat_id}")
         return state.qwen_chat_id
@@ -244,7 +244,7 @@ async def get_or_create_qwen_chat(token_obj, openweb_chat_id: str, model: str):
         is_new=True,
         created_at=time.time()
     )
-    await backend.set(openweb_chat_id, new_state)
+    await backend.set(openweb_chat_id, new_state, model=model)
     logger.info(f"Created and saved chat: {openweb_chat_id} -> {qwen_chat_id}")
     # 🔥 IMPORTANT: Delay AFTER saving state
     # This gives Qwen time to fully initialize the new chat before first message
@@ -252,7 +252,7 @@ async def get_or_create_qwen_chat(token_obj, openweb_chat_id: str, model: str):
     return qwen_chat_id
 
 
-async def update_chat_parent_id(openweb_chat_id: str, new_parent_id: str):
+async def update_chat_parent_id(openweb_chat_id: str, new_parent_id: str, model: Optional[str] = None):
     """
     Update the last_parent_id for a chat after successful response.
     The parent_id is used by Qwen API to maintain message threading within a chat.
@@ -261,10 +261,19 @@ async def update_chat_parent_id(openweb_chat_id: str, new_parent_id: str):
     Args:
         openweb_chat_id: OpenWebUI chat identifier
         new_parent_id: Response ID from Qwen API to use as parent for next message
+        model: Optional model name for analytics/future routing logic (backward compatible)
+    
     Side effects:
         - Updates state via backend
         - Logs update operation
     """
     backend = get_chat_state_backend()
-    await backend.update_parent(openweb_chat_id, new_parent_id)
-    logger.debug(f"Updated: last_parent_id[{openweb_chat_id[:8]}...] = {new_parent_id[:8]}...")
+    await backend.update_parent(openweb_chat_id, new_parent_id, model=model)
+    if model:
+        logger.debug(f"📊 Model context: {model} for chat {openweb_chat_id[:8]}...")
+        # Here we can add:
+        # - logic for saving the model to chat metadata
+        # - model usage analytics
+        # - prefix caching for different models
+        
+    logger.debug(f"✅ Updated: last_parent_id[{openweb_chat_id[:8]}...] = {new_parent_id[:8]}... (model={model})")

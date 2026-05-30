@@ -35,6 +35,8 @@ Features:
     • Supports legacy and new JSON formats
     • Idempotent: safe to run multiple times
     • Secure: uses parameterized queries, no passwords in CLI args
+    • 🔧 UPDATED: Supports composite primary key (openweb_id, model) for chat_state isolation
+    • 🔧 UPDATED: Auto-migrates existing tables to new schema (adds model column, updates PK)
 """
 import os
 import sys
@@ -205,8 +207,104 @@ async def connect_target(target: MigrationTarget, socket_dir: Optional[str]) -> 
     )
 
 
+def _normalize_model_for_db(model: Optional[str]) -> str:
+    """
+    Normalizes the model for storage in the database:
+    - None or empty string → '' (empty string)
+    - Any other value → as is
+    This ensures backward compatibility with legacy model-less records.
+    """
+    return model or ""
+
+
+async def _ensure_chat_state_schema(conn, table_name: str) -> bool:
+    """
+    Ensures the chat_state table has the correct schema with composite key.
+    Handles migration from legacy schema (openweb_id PRIMARY KEY) to new schema
+    (openweb_id, model) PRIMARY KEY.
+    
+    Returns True if schema is ready, False on error.
+    """
+    try:
+        # Check if table exists
+        table_exists = await conn.fetchval(
+            "SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = $1",
+            table_name
+        )
+        
+        if not table_exists:
+            # Table doesn't exist - will be created later by CREATE TABLE IF NOT EXISTS
+            return True
+        
+        # 🔧 Step 1: Add 'model' column if missing (with DEFAULT '' to avoid NULL issues)
+        column_exists = await conn.fetchval(
+            "SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = $1 AND column_name = 'model'",
+            table_name
+        )
+        
+        if not column_exists:
+            logger.info(f"🔧 Adding 'model' column to table '{table_name}' with DEFAULT ''...")
+            # Add column with DEFAULT '' so new rows get empty string, not NULL
+            await conn.execute(f"ALTER TABLE {table_name} ADD COLUMN model TEXT DEFAULT ''")
+        else:
+            # Column exists - ensure existing NULL values are normalized to ''
+            logger.info(f"🔧 Normalizing NULL values in 'model' column for '{table_name}'...")
+            await conn.execute(f"UPDATE {table_name} SET model = '' WHERE model IS NULL")
+        
+        # 🔧 Step 2: Check and migrate primary key
+        pk_info = await conn.fetchrow(
+            f"""
+            SELECT 
+                string_agg(column_name, ',' ORDER BY ordinal_position) as pk_columns,
+                constraint_name
+            FROM information_schema.key_column_usage
+            WHERE table_schema = 'public' 
+            AND table_name = $1 
+            AND constraint_name LIKE '%_pkey'
+            GROUP BY constraint_name
+            """,
+            table_name
+        )
+        
+        if pk_info and pk_info['pk_columns']:
+            current_pk = pk_info['pk_columns']
+            constraint_name = pk_info['constraint_name']
+            
+            # If PK is only 'openweb_id', we need to migrate to composite key
+            if current_pk == 'openweb_id':
+                logger.info(f"🔧 Migrating primary key on '{table_name}' from ({current_pk}) to (openweb_id, model)...")
+                
+                # Drop old primary key constraint
+                await conn.execute(f"ALTER TABLE {table_name} DROP CONSTRAINT {constraint_name}")
+                
+                # ✅ CRITICAL: Ensure no NULL values exist before creating composite PK
+                await conn.execute(f"UPDATE {table_name} SET model = '' WHERE model IS NULL")
+                
+                # Create new composite primary key
+                await conn.execute(f"ALTER TABLE {table_name} ADD PRIMARY KEY (openweb_id, model)")
+                
+                logger.info(f"✅ Primary key migration complete for '{table_name}'")
+            elif current_pk == 'openweb_id,model':
+                logger.info(f"✅ Table '{table_name}' already has correct composite primary key")
+            else:
+                logger.warning(f"⚠️ Table '{table_name}' has unexpected primary key: ({current_pk})")
+        else:
+            # No primary key found - create composite one
+            logger.info(f"🔧 Adding composite primary key to '{table_name}'...")
+            # Ensure no NULL values first
+            await conn.execute(f"UPDATE {table_name} SET model = '' WHERE model IS NULL")
+            await conn.execute(f"ALTER TABLE {table_name} ADD PRIMARY KEY (openweb_id, model)")
+            logger.info(f"✅ Primary key added to '{table_name}'")
+        
+        return True
+        
+    except Exception as e:
+        logger.error(f"❌ Schema migration failed for '{table_name}': {e}")
+        return False
+
+
 async def migrate_chat_state(target: MigrationTarget, socket_dir: Optional[str]) -> int:
-    """Migrate chat_state.json to PostgreSQL."""
+    """Migrate chat_state.json to PostgreSQL with composite key support."""
     logger.info(f"🚀 Migrating {target.description}...")
 
     try:
@@ -216,16 +314,23 @@ async def migrate_chat_state(target: MigrationTarget, socket_dir: Optional[str])
         return 0
 
     try:
-        # Create table
-        logger.info(f"📋 Creating table '{target.db_table}'...")
+        # 🔧 Ensure table schema is up-to-date (handles existing tables)
+        if not await _ensure_chat_state_schema(conn, target.db_table):
+            logger.error(f"❌ Failed to prepare schema for '{target.db_table}'")
+            return 0
+        
+        # Create table if it doesn't exist (now with correct schema)
+        logger.info(f"📋 Ensuring table '{target.db_table}' exists with correct schema...")
         await conn.execute(f"""
             CREATE TABLE IF NOT EXISTS {target.db_table} (
-                openweb_id TEXT PRIMARY KEY,
+                openweb_id TEXT NOT NULL,
+                model TEXT,
                 qwen_chat_id TEXT NOT NULL,
                 last_parent_id TEXT,
                 is_new BOOLEAN DEFAULT FALSE,
                 created_at DOUBLE PRECISION,
-                updated_at TIMESTAMP DEFAULT NOW()
+                updated_at TIMESTAMP DEFAULT NOW(),
+                PRIMARY KEY (openweb_id, model)
             )
         """)
         await conn.execute(f"""
@@ -254,6 +359,7 @@ async def migrate_chat_state(target: MigrationTarget, socket_dir: Optional[str])
                     last_parent_id = None
                     is_new = False
                     created_at = 0.0
+                    model = None  # Legacy records have no model
                 elif isinstance(value, dict):
                     qwen_chat_id = value.get("qwen_chat_id")
                     if not qwen_chat_id:
@@ -263,22 +369,27 @@ async def migrate_chat_state(target: MigrationTarget, socket_dir: Optional[str])
                     last_parent_id = value.get("last_parent_id")
                     is_new = value.get("_is_new", value.get("is_new", False))
                     created_at = value.get("_created_at", value.get("created_at", 0.0))
+                    # 🔧 Extract model if present (for future-proofing)
+                    model = value.get("model")
                 else:
                     logger.warning(f"⚠️ Skipping {openweb_id}: unknown format")
                     skipped += 1
                     continue
 
+                # 🔧 Normalize model for DB storage (None → '')
+                norm_model = _normalize_model_for_db(model)
+
                 await conn.execute(f"""
                     INSERT INTO {target.db_table}
-                    (openweb_id, qwen_chat_id, last_parent_id, is_new, created_at, updated_at)
-                    VALUES ($1, $2, $3, $4, $5, NOW())
-                    ON CONFLICT (openweb_id) DO UPDATE SET
+                    (openweb_id, model, qwen_chat_id, last_parent_id, is_new, created_at, updated_at)
+                    VALUES ($1, $2, $3, $4, $5, $6, NOW())
+                    ON CONFLICT (openweb_id, model) DO UPDATE SET
                         qwen_chat_id = EXCLUDED.qwen_chat_id,
                         last_parent_id = EXCLUDED.last_parent_id,
                         is_new = EXCLUDED.is_new,
                         created_at = EXCLUDED.created_at,
                         updated_at = NOW()
-                """, openweb_id, qwen_chat_id, last_parent_id, is_new, created_at)
+                """, openweb_id, norm_model, qwen_chat_id, last_parent_id, is_new, created_at)
 
                 migrated += 1
             except Exception as e:
@@ -303,7 +414,7 @@ async def migrate_tokens(target: MigrationTarget, socket_dir: Optional[str]) -> 
         return 0
 
     try:
-        # ✅ Создаем таблицу с raw_data JSONB для ПОЛНОГО хранения объекта
+        # ✅ Create a table with raw_data JSONB for FULL storage of the object
         logger.info(f"📋 Creating table '{target.db_table}'...")
         await conn.execute(f"""
             CREATE TABLE IF NOT EXISTS {target.db_table} (
@@ -330,7 +441,7 @@ async def migrate_tokens(target: MigrationTarget, socket_dir: Optional[str]) -> 
             for item in data:
                 if isinstance(item, dict) and "id" in item:
                     token_id = item["id"]
-                    # ✅ Сохраняем ВЕСЬ объект целиком в raw_data
+                    # ✅ We save the ENTIRE object in raw_data
                     tokens_to_migrate.append((token_id, item))
                 else:
                     logger.warning(f"⚠️ Skipping invalid token item: missing 'id' field")
@@ -352,7 +463,7 @@ async def migrate_tokens(target: MigrationTarget, socket_dir: Optional[str]) -> 
 
         for token_id, full_token_obj in tokens_to_migrate:
             try:
-                # ✅ Вставляем id и ВЕСЬ объект в raw_data
+                # ✅ Insert the id and the ENTIRE object into raw_data
                 await conn.execute(f"""
                     INSERT INTO {target.db_table}
                     (id, raw_data, created_at, updated_at, last_used_at)

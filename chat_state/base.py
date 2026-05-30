@@ -36,12 +36,13 @@ from typing import Optional
 class ChatStateData:
     """
     Data structure representing chat state mapping.
-    Used uniformly across all backend implementations.
+    Updated with model field for isolation support.
     """
     qwen_chat_id: str
     last_parent_id: Optional[str] = None
     is_new: bool = False
     created_at: float = 0.0
+    model: Optional[str] = None  # The model to which the state is bound
 
     def to_dict(self) -> dict:
         """Convert to dictionary for JSON serialization."""
@@ -49,7 +50,8 @@ class ChatStateData:
             "qwen_chat_id": self.qwen_chat_id,
             "last_parent_id": self.last_parent_id,
             "is_new": self.is_new,
-            "created_at": self.created_at
+            "created_at": self.created_at,
+            "model": self.model
         }
 
     @classmethod
@@ -59,14 +61,15 @@ class ChatStateData:
             qwen_chat_id=data.get("qwen_chat_id", ""),
             last_parent_id=data.get("last_parent_id"),
             is_new=data.get("is_new", False),
-            created_at=data.get("created_at", 0.0)
+            created_at=data.get("created_at", 0.0),
+            model=data.get("model")
         )
 
 
 class ChatStateBackend(ABC):
     """
     Abstract base class for chat state storage backends.
-    All implementations (File, PostgreSQL) must inherit this.
+    Updated methods to accept optional model parameter.
     """
 
     @abstractmethod
@@ -80,28 +83,34 @@ class ChatStateBackend(ABC):
         pass
 
     @abstractmethod
-    async def get(self, openweb_id: str) -> Optional[ChatStateData]:
-        """Retrieve state for given OpenWebUI chat ID."""
+    async def get(self, openweb_id: str, model: Optional[str] = None) -> Optional[ChatStateData]:
+        """Retrieve state for given OpenWebUI chat ID and model."""
         pass
 
     @abstractmethod
-    async def set(self, openweb_id: str, data: ChatStateData):
-        """Save or update state for given OpenWebUI chat ID."""
+    async def set(self, openweb_id: str, data: ChatStateData, model: Optional[str] = None):
+        """Save or update state for given OpenWebUI chat ID and model."""
         pass
 
     @abstractmethod
-    async def update_parent(self, openweb_id: str, parent_id: str):
-        """Update last_parent_id for existing chat."""
+    async def update_parent(self, openweb_id: str, parent_id: str, model: Optional[str] = None):
+        """Update last_parent_id for existing chat and model."""
         pass
 
     @abstractmethod
-    async def delete(self, openweb_id: str):
-        """Delete state for given OpenWebUI chat ID."""
+    async def delete(self, openweb_id: str, model: Optional[str] = None):
+        """Delete state for given OpenWebUI chat ID and model."""
         pass
 
     async def health_check(self) -> bool:
-        """
-        Check backend availability.
-        Default implementation returns True; override if needed.
-        """
+        """Check backend availability."""
         return True
+
+    def _make_key(self, openweb_id: str, model: Optional[str] = None) -> str:
+        """
+        Generates a composite key for isolating states by model.
+        If a model is not specified, the base key is used (backward compatibility).
+        """
+        if model:
+            return f"{openweb_id}:{model}"
+        return openweb_id

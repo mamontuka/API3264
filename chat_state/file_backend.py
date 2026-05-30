@@ -40,33 +40,29 @@ logger = logging.getLogger("FreeQwenApi")
 
 
 class FileBackend(ChatStateBackend):
-    """
-    File-based implementation of ChatStateBackend.
-    Stores chat mappings in a JSON file with atomic write operations.
-    Thread-safe via internal lock.
-    """
-
     def __init__(self, file_path: Path):
         self.file_path = file_path
         self._lock = asyncio.Lock()
         self._data: dict[str, dict] = {}
 
+    def _get_file_path(self, openweb_id: str, model: Optional[str] = None) -> Path:
+        """Generates a file path based on the model."""
+        key = self._make_key(openweb_id, model)
+        safe_key = key.replace(":", "_").replace("/", "_")
+        return self.file_path.parent / f"{safe_key}.json"
+
     async def init(self) -> bool:
-        """Load existing state from file if present."""
         try:
-            # Ensure parent directory exists
             self.file_path.parent.mkdir(parents=True, exist_ok=True)
 
             if self.file_path.exists():
                 async with self._lock:
                     with open(self.file_path, "r", encoding="utf-8") as f:
                         loaded = json.load(f)
-                        # Convert dict format to internal structure
                         for key, value in loaded.items():
                             if isinstance(value, dict):
                                 self._data[key] = value
                             else:
-                                # Legacy format fallback
                                 self._data[key] = {
                                     "qwen_chat_id": value,
                                     "last_parent_id": None,
@@ -82,13 +78,11 @@ class FileBackend(ChatStateBackend):
             return False
 
     async def close(self):
-        """Save state and release resources."""
         await self._save()
         self._data.clear()
         logger.debug("💾 FileBackend closed")
 
     async def _save(self):
-        """Atomic save to file."""
         async with self._lock:
             try:
                 temp_file = str(self.file_path) + ".tmp"
@@ -105,46 +99,59 @@ class FileBackend(ChatStateBackend):
                 logger.error(f"❌ FileBackend save error: {e}")
                 raise
 
-    async def get(self, openweb_id: str) -> Optional[ChatStateData]:
-        """Retrieve state for given OpenWebUI chat ID."""
-        async with self._lock:
-            record = self._data.get(openweb_id)
-            if not record:
+    async def get(self, openweb_id: str, model: Optional[str] = None) -> Optional[ChatStateData]:
+        loop = asyncio.get_event_loop()
+        file_path = self._get_file_path(openweb_id, model)
+        
+        # Try to read file with composite key
+        if await loop.run_in_executor(None, file_path.exists):
+            try:
+                content = await loop.run_in_executor(None, file_path.read_text)
+                data = json.loads(content)
+                return ChatStateData.from_dict(data)
+            except (json.JSONDecodeError, KeyError):
                 return None
-            return ChatStateData(
-                qwen_chat_id=record.get("qwen_chat_id", ""),
-                last_parent_id=record.get("last_parent_id"),
-                is_new=record.get("is_new", False),
-                created_at=record.get("created_at", 0.0)
-            )
+        
+        # Fallback: check legacy file without model
+        if model:
+            legacy_path = self._get_file_path(openweb_id, None)
+            if await loop.run_in_executor(None, legacy_path.exists):
+                try:
+                    content = await loop.run_in_executor(None, legacy_path.read_text)
+                    data = json.loads(content)
+                    return ChatStateData.from_dict(data)
+                except:
+                    pass
+        
+        return None
 
-    async def set(self, openweb_id: str, data: ChatStateData):
-        """Save or update state for given OpenWebUI chat ID."""
+    async def set(self, openweb_id: str, data: ChatStateData, model: Optional[str] = None):
+        effective_model = model or data.model
+        file_path = self._get_file_path(openweb_id, effective_model)
+        
         async with self._lock:
-            self._data[openweb_id] = {
-                "qwen_chat_id": data.qwen_chat_id,
-                "last_parent_id": data.last_parent_id,
-                "is_new": data.is_new,
-                "created_at": data.created_at
-            }
+            self._data[file_path.stem] = data.to_dict()
         await self._save()
 
-    async def update_parent(self, openweb_id: str, parent_id: str):
-        """Update last_parent_id for existing chat."""
-        async with self._lock:
-            if openweb_id in self._data:
-                self._data[openweb_id]["last_parent_id"] = parent_id
-                self._data[openweb_id]["is_new"] = False
-        await self._save()
+    async def update_parent(self, openweb_id: str, parent_id: str, model: Optional[str] = None):
+        state = await self.get(openweb_id, model)
+        if not state:
+            return
+        
+        state.last_parent_id = parent_id
+        state.is_new = False
+        await self.set(openweb_id, state, model)
 
-    async def delete(self, openweb_id: str):
-        """Delete state for given OpenWebUI chat ID."""
-        async with self._lock:
-            self._data.pop(openweb_id, None)
-        await self._save()
+    async def delete(self, openweb_id: str, model: Optional[str] = None):
+        loop = asyncio.get_event_loop()
+        file_path = self._get_file_path(openweb_id, model)
+        
+        if await loop.run_in_executor(None, file_path.exists):
+            await loop.run_in_executor(None, file_path.unlink)
+            return True
+        return False
 
     async def health_check(self) -> bool:
-        """Check if file is writable."""
         try:
             self.file_path.parent.mkdir(parents=True, exist_ok=True)
             test_file = self.file_path.parent / ".write_test"

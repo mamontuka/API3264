@@ -55,15 +55,17 @@ class PostgresBackend(ChatStateBackend):
 
         try:
             async with pool.acquire() as conn:
-                # Create table in our own DB
+                # ✅ CORRECT: Simple composite primary key (no functions)
                 await conn.execute(f"""
                     CREATE TABLE IF NOT EXISTS {self.table} (
-                        openweb_id TEXT PRIMARY KEY,
+                        openweb_id TEXT NOT NULL,
+                        model TEXT,
                         qwen_chat_id TEXT NOT NULL,
                         last_parent_id TEXT,
                         is_new BOOLEAN DEFAULT FALSE,
                         created_at DOUBLE PRECISION,
-                        updated_at TIMESTAMP DEFAULT NOW()
+                        updated_at TIMESTAMP DEFAULT NOW(),
+                        PRIMARY KEY (openweb_id, model)
                     )
                 """)
                 await conn.execute(f"""
@@ -76,73 +78,121 @@ class PostgresBackend(ChatStateBackend):
             return False
 
     async def close(self):
-        pass  # Pool closing over close_state_db_pool()
+        pass
 
-    async def get(self, openweb_id: str) -> Optional[ChatStateData]:
+    def _normalize_model(self, model: Optional[str]) -> str:
+        """
+        Normalizes the model for storage in the database:
+        - None or empty string → '' (empty string)
+        - Any other value → as is
+        This ensures backward compatibility with legacy model-less records.
+        """
+        return model or ""
+
+    async def get(self, openweb_id: str, model: Optional[str] = None) -> Optional[ChatStateData]:
         pool = get_state_db_pool()
         if not pool:
             return None
         try:
             async with pool.acquire() as conn:
+                # ✅ Normalize the model before querying
+                norm_model = self._normalize_model(model)
+                
+                # Trying to find a record with a normalized model
                 row = await conn.fetchrow(
-                    f"SELECT * FROM {self.table} WHERE openweb_id = $1",
-                    openweb_id
+                    f"""
+                    SELECT * FROM {self.table} 
+                    WHERE openweb_id = $1 AND model = $2
+                    """,
+                    openweb_id,
+                    norm_model
                 )
-                if not row:
-                    return None
-                return ChatStateData(
-                    qwen_chat_id=row["qwen_chat_id"],
-                    last_parent_id=row["last_parent_id"],
-                    is_new=row["is_new"],
-                    created_at=row["created_at"] or 0.0
-                )
+                
+                if row:
+                    # Return the model as is (maybe None for legacy)
+                    return ChatStateData(
+                        qwen_chat_id=row["qwen_chat_id"],
+                        last_parent_id=row["last_parent_id"],
+                        is_new=row["is_new"],
+                        created_at=row["created_at"] or 0.0,
+                        model=row["model"] if row["model"] else model
+                    )
+                
+                # Fallback: If the model was specified but not found, we look for the legacy record (model IS NULL)
+                if model:
+                    fallback = await conn.fetchrow(
+                        f"""
+                        SELECT * FROM {self.table} 
+                        WHERE openweb_id = $1 AND model IS NULL
+                        """,
+                        openweb_id
+                    )
+                    if fallback:
+                        logger.debug(f"🔄 Fallback to legacy state for {openweb_id}")
+                        return ChatStateData(
+                            qwen_chat_id=fallback["qwen_chat_id"],
+                            last_parent_id=fallback["last_parent_id"],
+                            is_new=fallback["is_new"],
+                            created_at=fallback["created_at"] or 0.0,
+                            model=None
+                        )
+                
+                return None
         except Exception as e:
             logger.error(f"PostgresBackend.get error: {e}")
             return None
 
-    async def set(self, openweb_id: str, data: ChatStateData):
+    async def set(self, openweb_id: str, data: ChatStateData, model: Optional[str] = None):
         pool = get_state_db_pool()
         if not pool:
             return
         try:
+            effective_model = self._normalize_model(model or data.model)
             async with pool.acquire() as conn:
                 await conn.execute(f"""
                     INSERT INTO {self.table} 
-                    (openweb_id, qwen_chat_id, last_parent_id, is_new, created_at, updated_at)
-                    VALUES ($1, $2, $3, $4, $5, NOW())
-                    ON CONFLICT (openweb_id) DO UPDATE SET
+                    (openweb_id, model, qwen_chat_id, last_parent_id, is_new, created_at, updated_at)
+                    VALUES ($1, $2, $3, $4, $5, $6, NOW())
+                    ON CONFLICT (openweb_id, model) DO UPDATE SET
                         qwen_chat_id = EXCLUDED.qwen_chat_id,
                         last_parent_id = EXCLUDED.last_parent_id,
                         is_new = EXCLUDED.is_new,
                         created_at = EXCLUDED.created_at,
                         updated_at = NOW()
-                """, openweb_id, data.qwen_chat_id, data.last_parent_id, data.is_new, data.created_at)
+                """, openweb_id, effective_model, data.qwen_chat_id, 
+                   data.last_parent_id, data.is_new, data.created_at)
         except Exception as e:
             logger.error(f"PostgresBackend.set error: {e}")
             raise
 
-    async def update_parent(self, openweb_id: str, parent_id: str):
+    async def update_parent(self, openweb_id: str, parent_id: str, model: Optional[str] = None):
         pool = get_state_db_pool()
         if not pool:
             return
         try:
+            norm_model = self._normalize_model(model)
             async with pool.acquire() as conn:
                 await conn.execute(f"""
                     UPDATE {self.table} 
                     SET last_parent_id = $1, is_new = FALSE, updated_at = NOW()
-                    WHERE openweb_id = $2
-                """, parent_id, openweb_id)
+                    WHERE openweb_id = $2 AND model = $3
+                """, parent_id, openweb_id, norm_model)
         except Exception as e:
             logger.error(f"PostgresBackend.update_parent error: {e}")
             raise
 
-    async def delete(self, openweb_id: str):
+    async def delete(self, openweb_id: str, model: Optional[str] = None):
         pool = get_state_db_pool()
         if not pool:
             return
         try:
+            norm_model = self._normalize_model(model)
             async with pool.acquire() as conn:
-                await conn.execute(f"DELETE FROM {self.table} WHERE openweb_id = $1", openweb_id)
+                result = await conn.execute(
+                    f"DELETE FROM {self.table} WHERE openweb_id = $1 AND model = $2",
+                    openweb_id, norm_model
+                )
+                return int(result.split()[-1]) > 0
         except Exception as e:
             logger.error(f"PostgresBackend.delete error: {e}")
             raise
