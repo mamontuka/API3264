@@ -76,6 +76,7 @@ from chat.models import load_available_models
 
 # Import auth browser for CLI
 from auth.browser import login_interactive
+from auth.browser import init_browser_singleton, close_shared_browser
 
 # Import token factory
 from token_backends.factory import init_token_storage, close_token_storage, get_token_backend
@@ -358,6 +359,14 @@ async def lifespan(app: FastAPI):
     logger.info("FastAPI startup: initializing backends...")
     await init_chat_state()
     await init_token_storage()
+    
+    # 🌐 INITIALIZING THE BROWSER
+    try:
+        await init_browser_singleton()
+        logger.info("✅ Browser singleton initialized")
+    except Exception as e:
+        logger.error(f"❌ Failed to initialize browser: {e}")
+        logger.warning("⚠️ Selenium Bridge will not be available!")
 
     if is_fallback_active():
         logger.warning("⚠️ ChatState is running in FALLBACK mode (File). PostgreSQL was unavailable.")
@@ -381,9 +390,16 @@ async def lifespan(app: FastAPI):
 
     # 🔧 SHUTDOWN: Cleanup resources
     logger.info("FastAPI shutdown: cleaning up resources...")
-    await http_client.aclose()
-    
+
+    # 🌐 CLOSING THE BROWSER
+    try:
+        await close_shared_browser()
+        logger.info("✅ Browser closed")
+    except Exception as e:
+        logger.warning(f"⚠️ Error closing browser: {e}")
+
     # 🔥 Close backends
+    await http_client.aclose()
     await close_token_storage()# Closes the Token DB pool
     await close_chat_state()   # Closes the State DB pool
     await close_db_pool()      # Closes the OpenWebUI DB pool

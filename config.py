@@ -57,11 +57,13 @@ class Config:
     # 🔥 Server settings
     PORT: int = int(os.getenv("PORT", "3264"))
     HOST: str = os.getenv("HOST", "10.32.64.2")
+
     # 🔥 Qwen API settings
     QWEN_BASE_URL: str = os.getenv("QWEN_BASE_URL", "https://chat.qwen.ai")
     CHAT_PAGE_URL: str = f"{QWEN_BASE_URL}/"
     CHAT_API_URL: str = f"{QWEN_BASE_URL}/api/v2/chat/completions"
     CREATE_CHAT_URL: str = f"{QWEN_BASE_URL}/api/v2/chats/new"
+
     # 🔥 File paths (absolute, relative to this file)
     SCRIPT_DIR: Path = Path(__file__).parent.resolve()
     SESSION_DIR: Path = SCRIPT_DIR / "session"
@@ -69,8 +71,10 @@ class Config:
     CHAT_STATE_FILE: Path = SESSION_DIR / "chat_state.json"
     CHAT_MAPPING_FILE: Path = SESSION_DIR / "chat_mapping.json"
     AVAILABLE_MODELS_FILE: Path = SCRIPT_DIR / "AvailableModels.txt"
+
     # 🔥 Default model and mapping
     DEFAULT_MODEL: str = os.getenv("DEFAULT_MODEL", "qwen3.5-max")
+    VISION_MODEL = os.getenv("VISION_MODEL", "qwen3.7-plus")
     MODEL_MAPPING: Dict[str, str] = {
         "qwen3.7-max": "qwen3.7-max",
         "qwen3.7-plus-preview": "qwen-latest-series-invite-beta-v16",
@@ -84,6 +88,7 @@ class Config:
         "qwen3": "qwen3-235b-a22b",
         "qwen2": "qwen2.5-max",
     }
+
     # =================================================================
     # MODEL PARENT_ID BEHAVIOR CONFIGURATION
     # =================================================================
@@ -119,22 +124,27 @@ class Config:
             "qwen2.5-max"
         )
     ).split(",")
+
     # Models that work correctly WITH parent_id=None (auto-build history inside chat_id)
     MODELS_WORKING_WITHOUT_PARENT_ID = os.getenv(
         "QWEN_MODELS_WITHOUT_PARENT_ID",
         ""
     ).split(",")
+
     # Strip whitespace from model names (in case of spaces in env)
     MODELS_REQUIRING_PARENT_ID = [m.strip() for m in MODELS_REQUIRING_PARENT_ID if m.strip()]
     MODELS_WORKING_WITHOUT_PARENT_ID = [m.strip() for m in MODELS_WORKING_WITHOUT_PARENT_ID if m.strip()]
+
     # 🔥 Logging configuration
     DEBUG_LOGGING: bool = os.getenv("DEBUG_LOGGING", "false").lower() in ("true", "1", "yes", "on")
     LOG_LEVEL: int = logging.DEBUG if DEBUG_LOGGING else logging.INFO
     LOG_FORMAT: str = '[%(asctime)s] [%(levelname)s] %(message)s'
     LOG_DATEFMT: str = '%H:%M:%S'
+
     # 🔥 OpenWebUI integration
     OPENWEBUI_CHAT_ID_MODE: str = os.getenv("OPENWEBUI_CHAT_ID_MODE", "stable").lower()  # stable, per_request, smart
     OPENWEBUI_USER_ID_HEADER: str = os.getenv("OPENWEBUI_USER_ID_HEADER", "x-openwebui-user-id")
+
     # 🔥 PostgreSQL for OpenWebUI (optional)
     OPENWEBUI_DB_ENABLED: bool = os.getenv("OPENWEBUI_DB_ENABLED", "false").lower() in ("true", "1", "yes", "on")
     OPENWEBUI_DB_HOST: str = os.getenv("OPENWEBUI_DB_HOST", "localhost")
@@ -252,6 +262,7 @@ class Config:
         if _missing_pg_vars:
             raise ValueError(f"CHAT_STATE_BACKEND=postgres require variables: {', '.join(_missing_pg_vars)}")
 
+
     # 🔥 Browser auth settings
     CHROME_USER_DATA: str = os.getenv("CHROME_USER_DATA", str(SCRIPT_DIR / "profile"))
 
@@ -283,9 +294,29 @@ class Config:
     CHROME_VIEWPORT_WIDTH: int = int(os.getenv("CHROME_VIEWPORT_WIDTH", "1280"))
     CHROME_VIEWPORT_HEIGHT: int = int(os.getenv("CHROME_VIEWPORT_HEIGHT", "720"))
 
+    # 🔥 Temporary files for Selenium Bridge
+    TEMP_FILES_DIR: Path = SCRIPT_DIR / "temp"
+
+    # 🔥 Selectors for Qwen web chat (Selenium Bridge)
+    QWEN_SEND_BUTTON_SELECTOR: str = os.getenv("QWEN_SEND_BUTTON_SELECTOR", ".send-button, button[class*='send']")
+    QWEN_RESPONSE_SELECTORS: List[str] = [
+        s.strip() for s in os.getenv("QWEN_RESPONSE_SELECTORS", 
+            "div.response-message-content,div.phase-answer,div.custom-qwen-markdown,div.qwen-markdown-paragraph,div.markdown-body,div.prose,.chat-message-assistant,.message-content,[data-testid='response'],article,.response-content"
+        ).split(",") if s.strip()
+    ]
+    QWEN_PREVIEW_SELECTORS: List[str] = [
+        s.strip() for s in os.getenv("QWEN_PREVIEW_SELECTORS",
+            ".attachment-item,.image-preview,[class*='upload'],img[src*='blob:'],img[src*='data:'],.file-item,div:has(img)"
+        ).split(",") if s.strip()
+    ]
+
+    # 🔥 Timeouts for browser operations
+    BROWSER_ACTION_TIMEOUT: float = float(os.getenv("BROWSER_ACTION_TIMEOUT", "300.0"))
+
     # 🔥 HTTP client settings
     HTTP_TIMEOUT: float = float(os.getenv("HTTP_TIMEOUT", "900.0"))
     HTTP_FOLLOW_REDIRECTS: bool = os.getenv("HTTP_FOLLOW_REDIRECTS", "true").lower() in ("true", "1", "yes", "on")
+
     # 🔥 Default headers for Qwen API requests
     DEFAULT_HEADERS: Dict[str, str] = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36",
@@ -294,11 +325,14 @@ class Config:
         "Origin": QWEN_BASE_URL,
         "Referer": CHAT_PAGE_URL,
     }
+
     @classmethod
     def ensure_dirs(cls):
         """Ensure all required directories exist"""
         cls.SESSION_DIR.mkdir(parents=True, exist_ok=True)
         Path(cls.CHROME_USER_DATA).mkdir(parents=True, exist_ok=True)
+        cls.TEMP_FILES_DIR.mkdir(parents=True, exist_ok=True)
+
     @classmethod
     def get_chat_id_headers(cls) -> List[str]:
         """List of header names that may contain chat/conversation ID"""
@@ -306,6 +340,7 @@ class Config:
             "x-chat-id", "x-conversation-id", "openwebui-chat-id",
             "x-openwebui-chat-id", "chatid", "conversationid"
         ]
+
     @classmethod
     def get_chat_id_fields(cls) -> List[str]:
         """List of JSON body field names that may contain chat/conversation ID"""
@@ -313,6 +348,7 @@ class Config:
             "chatId", "chat_id", "conversation_id", "conversationId",
             "thread_id", "threadId", "session_id", "sessionId"
         ]
+
     @classmethod
     def get_nested_chat_id_paths(cls) -> List[tuple]:
         """List of (parent_key, child_key) tuples for nested chat ID lookup"""
@@ -333,6 +369,7 @@ def setup_logging():
     root_logger = logging.getLogger()
     if root_logger.handlers:
         root_logger.handlers.clear()
+
     # Configure root logger
     logging.basicConfig(
         level=Config.LOG_LEVEL,
@@ -340,10 +377,12 @@ def setup_logging():
         datefmt=Config.LOG_DATEFMT,
         force=True  # Clear existing handlers
     )
+
     # Set levels for noisy libraries
     logging.getLogger("httpcore").setLevel(logging.WARNING)
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("uvicorn").setLevel(logging.WARNING)
     logging.getLogger("fastapi").setLevel(logging.WARNING)
+
     # 🔥 REMOVED: psycopg2 logging (now using asyncpg in db_async.py)
     return logging.getLogger("FreeQwenApi")

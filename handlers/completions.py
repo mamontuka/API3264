@@ -19,7 +19,7 @@
 # GNU General Public License for more details.
 #
 # You should have received a copy of the GNU General Public License
-# along with this program. If not, see <https://www.gnu.org/>.
+# along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 """
 MODULE: HANDLERS COMPLETIONS
@@ -31,6 +31,7 @@ import time
 import logging
 from typing import Dict, Any, List, Optional
 
+import requests
 from fastapi import Request
 from fastapi.responses import StreamingResponse, JSONResponse
 
@@ -43,8 +44,13 @@ from chat.models import get_mapped_model
 from chat.ids import _extract_chat_ids, _generate_openweb_chat_id_async
 from chat.mapping import get_or_create_qwen_chat, update_chat_parent_id
 from core.engine import execute_qwen_completion
+from handlers.selenium_bridge import SeleniumBridge
+from auth.browser import get_shared_browser_page
 
 logger = logging.getLogger(__name__)
+
+# 🔒 Lock for serialization of browser operations
+_selenium_lock = asyncio.Lock()
 
 
 def _extract_messages(body: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -295,7 +301,260 @@ async def handle_chat_completions(request: Request, body: Dict[str, Any]):
     # Normalize message content and extract files
     message_content = _normalize_message_content(user_msg_obj.get("content", ""))
     files = user_msg_obj.get("files") if isinstance(user_msg_obj.get("files"), list) else body.get("files") or []
+    images = user_msg_obj.get("images") if isinstance(user_msg_obj.get("images"), list) else []
+    
+    # 🔥 ADDITIONAL CHECK: Search for images inside content (OpenWebUI multimodal format)
+    raw_content = user_msg_obj.get("content", "")
+    multimodal_images = []
+    if isinstance(raw_content, list):
+        for item in raw_content:
+            if isinstance(item, dict) and item.get("type") == "image_url":
+                img_url = item.get("image_url", {}).get("url", "")
+                if img_url:
+                    multimodal_images.append(img_url)
+    
+    # =================================================================
+    # 🔥 SELENIUM BRIDGE: Vision handling with ISOLATED STATE
+    # =================================================================
+    if images or files or multimodal_images:
+        logger.info(f"🖼️ Detected media content, switching to Selenium Bridge mode")
 
+        # Extracting base64 data
+        img_data = None
+        if multimodal_images:
+            img_data = multimodal_images[0]
+            if "," in img_data:
+                img_data = img_data.split(",", 1)[-1]
+        elif images:
+            img_data = images[0] if isinstance(images[0], str) else images[0].get("data")
+        elif files:
+            first_file = files[0]
+            if isinstance(first_file, dict):
+                img_data = first_file.get("data") or first_file.get("content")
+            elif isinstance(first_file, str):
+                img_data = first_file
+
+        if img_data:
+            extracted_chat_id, incoming_parent_id = _extract_chat_ids(body)
+
+            if extracted_chat_id:
+                openweb_chat_id = extracted_chat_id
+            else:
+                openweb_chat_id = await _generate_openweb_chat_id_async(request, body, model)
+
+            # We use a separate state key for vision: "{mapped_model}:vision"
+            vision_model_key = f"{mapped_model}:vision"
+
+            # Getting states backend
+            from chat_state.factory import get_chat_state_backend
+            backend = get_chat_state_backend()
+
+            # Checking the existing vision chat
+            state = await backend.get(openweb_chat_id, model=vision_model_key)
+            qwen_chat_id = state.qwen_chat_id if state and state.qwen_chat_id else None
+
+            # If there is no chat, create a new one with an explicit link to VISION_MODEL
+            if not qwen_chat_id:
+                logger.info(f"Creating new isolated vision chat for {vision_model_key}...")
+
+                # We define the target vision model (from the config or fallback to mapped_model)
+                VISION_MODEL = getattr(Config, 'VISION_MODEL', mapped_model)
+
+                headers = {
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {token_info['token']}",
+                    "User-Agent": Config.DEFAULT_HEADERS["User-Agent"],
+                    "Referer": Config.CHAT_PAGE_URL
+                }
+
+                if "cookies" in token_info:
+                    cookie_str = "; ".join([f"{c['name']}={c['value']}" for c in token_info["cookies"]])
+                    headers["Cookie"] = cookie_str
+
+                try:
+                    resp = requests.post(
+                        Config.CREATE_CHAT_URL,
+                        headers=headers,
+                        json={
+                            "models": [VISION_MODEL],  # 🔥 Clear binding to the model!
+                            "chat_mode": "normal",
+                            "chat_type": "t2t"
+                        },
+                        timeout=30
+                    )
+
+                    if resp.status_code != 200:
+                        logger.error(f"Create vision chat failed: HTTP {resp.status_code}")
+                        return JSONResponse(status_code=500, content={"error": f"Failed to create vision chat: HTTP {resp.status_code}"})
+
+                    result = resp.json()
+                    qwen_chat_id = result.get("id") or result.get("chatId") or result.get("data", {}).get("id")
+
+                    if not qwen_chat_id:
+                        logger.error(f"Create vision chat response missing id: {result}")
+                        return JSONResponse(status_code=500, content={"error": "API response missing vision chat ID"})
+
+                    logger.info(f"✅ Created isolated vision chat: {qwen_chat_id[:8]} for model {VISION_MODEL}")
+
+                    # Saving state in the backend
+                    from chat_state.base import ChatStateData
+                    new_state = ChatStateData(
+                        qwen_chat_id=qwen_chat_id,
+                        last_parent_id=None,
+                        is_new=True,
+                        created_at=time.time(),
+                        model=vision_model_key
+                    )
+                    await backend.set(openweb_chat_id, new_state, model=vision_model_key)
+
+                except Exception as e:
+                    logger.error(f"Create vision chat error: {e}", exc_info=True)
+                    return JSONResponse(status_code=500, content={"error": f"Create vision chat error: {str(e)}"})
+            else:
+                logger.debug(f"Using existing isolated vision chat: {qwen_chat_id[:8]}")
+
+            # 🔥 HARD FILTERING: Remove EVERYTHING except user text
+            user_text_parts = []
+            for msg in messages:
+                if msg.get("role") == "user":
+                    content = msg.get("content", "")
+                    if isinstance(content, str):
+                        user_text_parts.append(content)
+                    elif isinstance(content, list):
+                        for item in content:
+                            if isinstance(item, dict) and item.get("type") == "text":
+                                user_text_parts.append(item.get("text", ""))
+
+            text_content = " ".join(user_text_parts).strip()
+            logger.debug(f"🔍 Filtered vision prompt ({len(text_content)} chars)")
+
+            bridge = None
+            async with _selenium_lock:
+                try:
+                    page = await get_shared_browser_page()
+                    bridge = SeleniumBridge(page)
+
+                    temp_path = await bridge.save_base64_to_temp(img_data)
+
+                    logger.info(f"🔍 Starting Vision Bridge upload for isolated chat {qwen_chat_id[:8]}...")
+
+                    # 🔥 We do NOT pass target_model — the chat has already been created with the required model!
+                    response_text = await bridge.upload_file_and_wait(
+                        temp_path,
+                        prompt_text=text_content,  # Custom text ONLY!
+                        chat_id=qwen_chat_id       # ISOLATED chat_id!
+                    )
+
+                    logger.info(f"✅ Vision Bridge returned {len(response_text)} chars")
+
+                    # 🔥 Protection against empty answers
+                    if not response_text or not response_text.strip():
+                        response_text = "[Vision model returned empty response]"
+                        logger.warning("⚠️ Vision response is empty, using fallback text")
+
+                    # 🔥 Generating a parent_id for vision chat
+                    # We use the response hash as a stable message identifier.
+                    import hashlib
+                    response_parent_id = hashlib.sha256(response_text.encode()).hexdigest()[:16]
+
+                    # Return the response (streaming or json)
+                    if stream:
+                        logger.info(f"📡 Returning Vision response as SSE stream")
+
+                        async def generate_vision_stream():
+                            try:
+                                # 🔥 We split a long response into chunks of ~100 characters each
+                                CHUNK_SIZE = 100
+                                text = response_text
+                                
+                                # We send the text in parts
+                                for i in range(0, len(text), CHUNK_SIZE):
+                                    chunk = text[i:i + CHUNK_SIZE]
+                                    yield "data: " + json.dumps({
+                                        "id": f"chatcmpl-{qwen_chat_id}",
+                                        "object": "chat.completion.chunk",
+                                        "created": int(time.time()),
+                                        "model": model,
+                                        "choices": [{"index": 0, "delta": {"content": chunk}, "finish_reason": None}]
+                                    }, ensure_ascii=False) + "\n\n"
+                                    
+                                    # Micro-delay between chunks (simulated streaming)
+                                    await asyncio.sleep(0.02)
+                                
+                                # Final chunk with finish_reason
+                                yield "data: " + json.dumps({
+                                    "id": f"chatcmpl-{qwen_chat_id}",
+                                    "object": "chat.completion.chunk",
+                                    "created": int(time.time()),
+                                    "model": model,
+                                    "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]
+                                }, ensure_ascii=False) + "\n\n"
+
+                                yield "data: [DONE]\n\n"
+                                logger.debug(f"📡 Vision stream completed successfully ({len(text)} chars in {(len(text) + CHUNK_SIZE - 1) // CHUNK_SIZE} chunks)")
+                            except Exception as e:
+                                logger.error(f"❌ Vision stream error: {e}", exc_info=True)
+                                
+                                # Sending the error as text
+                                yield "data: " + json.dumps({
+                                    "id": f"chatcmpl-{qwen_chat_id}",
+                                    "object": "chat.completion.chunk",
+                                    "created": int(time.time()),
+                                    "model": model,
+                                    "choices": [{"index": 0, "delta": {"content": f"[Stream Error: {str(e)}]"}, "finish_reason": None}]
+                                }, ensure_ascii=False) + "\n\n"
+                                yield "data: [DONE]\n\n"
+                            finally:
+                                logger.debug(f"🔚 Vision stream generator finished")
+
+                        # 🔥 Update parent_id after the start of the stream (asynchronously)
+                        asyncio.create_task(
+                            update_chat_parent_id(openweb_chat_id, response_parent_id, model=vision_model_key)
+                        )
+
+                        headers = {
+                            "Cache-Control": "no-cache, no-store, must-revalidate",
+                            "Content-Type": "text/event-stream",
+                            "X-Accel-Buffering": "no",
+                        }
+                        return StreamingResponse(generate_vision_stream(), media_type="text/event-stream", headers=headers)
+                    else:
+                        logger.info(f"📦 Returning Vision response as JSON")
+
+                        # 🔥 Updating parent_id for a non-streaming response
+                        await update_chat_parent_id(openweb_chat_id, response_parent_id, model=vision_model_key)
+
+                        try:
+                            return _build_openai_completion(response_text, model, qwen_chat_id, response_parent_id)
+                        except Exception as e:
+                            logger.error(f"❌ _build_openai_completion failed: {e}", exc_info=True)
+                            return JSONResponse(content={
+                                "id": f"chatcmpl-{qwen_chat_id}",
+                                "object": "chat.completion",
+                                "created": int(time.time()),
+                                "model": model,
+                                "choices": [{
+                                    "index": 0,
+                                    "message": {"role": "assistant", "content": response_text},
+                                    "finish_reason": "stop"
+                                }],
+                                "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+                            })
+
+                except Exception as e:
+                    logger.error(f"❌ Vision Bridge failed: {e}", exc_info=True)
+                    return JSONResponse(status_code=500, content={"error": f"Vision Bridge error: {str(e)}"})
+                finally:
+                    if bridge:
+                        await bridge.cleanup()
+        else:
+            logger.warning("⚠️ Media detected but no valid base64 data found")
+
+
+    # =================================================================
+    # STANDARD TEXT PROCESSING (no media)
+    # =================================================================
+    
     # Debug logging (only if enabled in Config)
     if Config.DEBUG_LOGGING:
         logger.debug(f"🔍 RAW BODY KEYS: {list(body.keys())}")
