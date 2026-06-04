@@ -36,6 +36,9 @@ uvicorn[standard]>=0.27.0,<1.0.0
 # 🔥 HTTP client with async support
 httpx>=0.26.0,<1.0.0
 
+# 🔥 HTTP client for synchronous API calls (Selenium Bridge)
+requests>=2.31.0,<3.0.0
+
 # 🔥 Browser automation for auth
 playwright>=1.41.0,<2.0.0
 
