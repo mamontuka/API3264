@@ -19,12 +19,13 @@
 # GNU General Public License for more details.
 #
 # You should have received a copy of the GNU General Public License
-# along with this program. If not, see <https://www.gnu.org/>.
+# along with this program. If not, see <https://www.gnu.org/licenses/>.
 #
 #
 
 import logging
 from typing import Optional
+import asyncpg
 from .base import ChatStateBackend, ChatStateData
 from .db_client import get_state_db_pool
 
@@ -68,10 +69,24 @@ class PostgresBackend(ChatStateBackend):
                         PRIMARY KEY (openweb_id, model)
                     )
                 """)
-                await conn.execute(f"""
-                    CREATE INDEX IF NOT EXISTS idx_{self.table}_updated 
-                    ON {self.table}(updated_at)
-                """)
+                
+                # 🔧 Wrap index creation in try/except to handle race conditions
+                try:
+                    await conn.execute(f"""
+                        CREATE INDEX IF NOT EXISTS idx_{self.table}_updated 
+                        ON {self.table}(updated_at)
+                    """)
+                except (asyncpg.exceptions.UniqueViolationError, 
+                        asyncpg.exceptions.DuplicateTableError) as e:
+                    logger.debug(f"⚡ Index idx_{self.table}_updated already exists (race, safe): {e}")
+                except Exception as e:
+                    # Check if it's a duplicate error in the message
+                    err_msg = str(e).lower()
+                    if "повторяющееся" in err_msg or "duplicate" in err_msg or "already exists" in err_msg:
+                        logger.debug(f"⚡ Index idx_{self.table}_updated already exists (race, safe)")
+                    else:
+                        raise
+            
             return True
         except Exception as e:
             logger.error(f"PostgresBackend init error: {e}")

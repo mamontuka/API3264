@@ -345,6 +345,14 @@ async def handle_chat_completions(request: Request, body: Dict[str, Any]):
             # We use a separate state key for vision: "{mapped_model}:vision"
             vision_model_key = f"{mapped_model}:vision"
 
+            # 🔥 DEV: Stable vision key per OpenWebUI conversation.
+            # Decoupled from mapped_model to prevent spawning multiple vision micro-chats
+            # when OWUI varies the model field or user switches text models.
+#            VISION_MODEL = getattr(Config, 'VISION_MODEL', 'qwen3.7-plus')
+#            vision_model_key = f"{VISION_MODEL}:vision"
+            
+            logger.debug(f"🔍 Vision state lookup: openweb={openweb_chat_id[:8]}, key={vision_model_key}")            
+
             # Getting states backend
             from chat_state.factory import get_chat_state_backend
             backend = get_chat_state_backend()
@@ -439,13 +447,21 @@ async def handle_chat_completions(request: Request, body: Dict[str, Any]):
                     logger.info(f"🔍 Starting Vision Bridge upload for isolated chat {qwen_chat_id[:8]}...")
 
                     # 🔥 We do NOT pass target_model — the chat has already been created with the required model!
-                    response_text = await bridge.upload_file_and_wait(
+                    bridge_result = await bridge.upload_file_and_wait(
                         temp_path,
                         prompt_text=text_content,  # Custom text ONLY!
                         chat_id=qwen_chat_id       # ISOLATED chat_id!
                     )
 
+                    response_text = bridge_result.get("text", "")
+                    extracted_image_url = bridge_result.get("image_url")
+                    
                     logger.info(f"✅ Vision Bridge returned {len(response_text)} chars")
+                    if extracted_image_url:
+                        logger.info(f"🖼️ CDN image URL extracted: {extracted_image_url}")
+                        # 🔥 Embed the CDN link in the response via Markdown (OpenWebUI will render it automatically)
+                        img_md = f"\n\n![Edited Image]({extracted_image_url})"
+                        response_text = (response_text + img_md) if response_text.strip() else img_md.strip()
 
                     # 🔥 Protection against empty answers
                     if not response_text or not response_text.strip():
@@ -456,6 +472,18 @@ async def handle_chat_completions(request: Request, body: Dict[str, Any]):
                     # We use the response hash as a stable message identifier.
                     import hashlib
                     response_parent_id = hashlib.sha256(response_text.encode()).hexdigest()[:16]
+
+                    # 🔥 Delayed junky empty chats cheanup
+                    async def delayed_vision_cleanup():
+                        try:
+                            await asyncio.sleep(15)
+                            from auth.browser import _cleanup_empty_chats
+                            logger.info("🧹 Running delayed cleanup of 'New chat's after vision response...")
+                            await _cleanup_empty_chats()
+                        except Exception as e:
+                            logger.debug(f"Delayed cleanup skipped or failed: {e}")
+                    
+                    asyncio.create_task(delayed_vision_cleanup())
 
                     # Return the response (streaming or json)
                     if stream:
@@ -479,7 +507,7 @@ async def handle_chat_completions(request: Request, body: Dict[str, Any]):
                                     }, ensure_ascii=False) + "\n\n"
                                     
                                     # Micro-delay between chunks (simulated streaming)
-                                    await asyncio.sleep(0.02)
+                                    await asyncio.sleep(0.2)
                                 
                                 # Final chunk with finish_reason
                                 yield "data: " + json.dumps({

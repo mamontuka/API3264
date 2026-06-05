@@ -49,7 +49,7 @@ _browser_lock = asyncio.Lock()
 
 async def _cleanup_empty_chats():
     """
-    Removes empty/extra chats on the Qwen side that are not in our state backend.
+    Removes chats on the Qwen side that are named "New chat".
     Runs at startup to kill automatically created chats.
     """
     try:
@@ -70,7 +70,7 @@ async def _cleanup_empty_chats():
             logger.warning("⚠️ No token available for cleanup")
             return
         
-        # Forming headlines
+        # Forming headers
         headers = {
             "Authorization": f"Bearer {token}",
             "Content-Type": "application/json",
@@ -84,7 +84,6 @@ async def _cleanup_empty_chats():
         # 1. Getting a list of chats with Qwen
         import httpx
         async with httpx.AsyncClient(timeout=30.0) as client:
-            # We're trying different endpoint options (Qwen might have changed the API)
             list_endpoints = [
                 f"{Config.QWEN_BASE_URL}/api/v2/chats/list",
                 f"{Config.QWEN_BASE_URL}/api/chats/list",
@@ -108,68 +107,72 @@ async def _cleanup_empty_chats():
                 logger.warning("⚠️ Could not fetch chat list from Qwen API")
                 return
             
-            # 2. We get a list of our qwen_chat_id's from the state backend
-            from chat_state.factory import get_chat_state_backend
-            state_backend = get_chat_state_backend()
-            
-            known_chat_ids = set()
-            try:
-                # For PostgreSQL backend
-                if hasattr(state_backend, 'table'):
-                    from chat_state.db_client import get_state_db_pool
-                    pool = get_state_db_pool()
-                    if pool:
-                        async with pool.acquire() as conn:
-                            rows = await conn.fetch(f"SELECT qwen_chat_id FROM {state_backend.table}")
-                            known_chat_ids = {row['qwen_chat_id'] for row in rows}
-                # For File backend
-                elif hasattr(state_backend, '_data'):
-                    for key, val in state_backend._data.items():
-                        if isinstance(val, dict) and 'qwen_chat_id' in val:
-                            known_chat_ids.add(val['qwen_chat_id'])
-            except Exception as e:
-                logger.warning(f"⚠️ Could not load state backend data: {e}")
-                return
-            
-            logger.info(f"📋 Known chat IDs in state: {len(known_chat_ids)}")
-            
-            # 3. Find and delete unnecessary chats
+            # 2. Find and delete ONLY chats named "New chat"
             deleted = 0
+            skipped = 0
+            
             for chat in chats:
                 chat_id = chat.get("id")
                 if not chat_id:
                     continue
                 
-                # We skip chats that are in our state
-                if chat_id in known_chat_ids:
-                    continue
-                
-                # Determine if a chat is empty
                 title = chat.get("title", "")
-                msg_count = chat.get("message_count", chat.get("messages_count", 0))
-                is_empty = (not title or title in ["New Chat", "Новый чат"]) and msg_count == 0
                 
-                if not is_empty:
+                # We delete ONLY chats with the name "New chat" (case insensitive)
+                if title.lower() != "new chat":
+                    skipped += 1
                     continue
-                
-                # Delete
+
+                logger.info(f"🗑️ Deleting chat 'New chat': {chat_id[:8]}...")
+
+                # --- ATTEMPT DELETION ---
                 delete_endpoints = [
-                    f"{Config.QWEN_BASE_URL}/api/v2/chats/{chat_id}/delete",
-                    f"{Config.QWEN_BASE_URL}/api/chats/{chat_id}/delete",
-                    f"{Config.QWEN_BASE_URL}/api/v1/chats/{chat_id}",
+                    (f"{Config.QWEN_BASE_URL}/api/v2/chats/{chat_id}", "DELETE"),
+                    (f"{Config.QWEN_BASE_URL}/api/v2/chats/{chat_id}/delete", "DELETE"),
+                    (f"{Config.QWEN_BASE_URL}/api/v2/chats/{chat_id}/delete", "POST"),
+                    (f"{Config.QWEN_BASE_URL}/api/chats/{chat_id}", "DELETE"),
                 ]
                 
-                for endpoint in delete_endpoints:
+                success = False
+                for endpoint, method in delete_endpoints:
                     try:
-                        del_resp = await client.post(endpoint, headers=headers)
-                        if del_resp.status_code in (200, 204):
+                        logger.debug(f"🔍 Attempting {method}: {endpoint}")
+                        
+                        if method == "DELETE":
+                            resp = await client.delete(endpoint, headers=headers)
+                        else:
+                            resp = await client.post(endpoint, headers=headers, json={"chat_id": chat_id})
+                        
+                        # Logging the response body
+                        resp_text = resp.text[:500]
+                        logger.debug(f"🔍 {method} {endpoint} -> Status: {resp.status_code}, Body: {resp_text}")
+                        
+                        # We check not only the status, but also the response body.
+                        if resp.status_code in (200, 204, 202):
+                            try:
+                                resp_json = resp.json()
+                                if resp_json.get("success", True) is False:
+                                    logger.warning(f"⚠️ {method} returned 200 but success=false: {resp_json}")
+                                    continue
+                            except:
+                                pass
+                            
                             deleted += 1
-                            logger.debug(f"🗑️ Deleted empty chat: {chat_id[:8]}...")
+                            logger.info(f"✅ Deleted via {method}: {chat_id[:8]}...")
+                            success = True
                             break
-                    except Exception:
+                        elif resp.status_code == 404:
+                            logger.debug(f"⚠️ Chat {chat_id[:8]} already deleted (404)")
+                            success = True
+                            break
+                    except Exception as e:
+                        logger.warning(f"⚠️ Error deleting {chat_id[:8]} via {method} {endpoint}: {e}")
                         continue
-            
-            logger.info(f"✅ Cleanup complete: {deleted} empty chats deleted")
+                
+                if not success:
+                    logger.error(f"❌ Failed to delete chat {chat_id[:8]}... after all attempts")
+
+            logger.info(f"✅ Cleanup complete: {deleted} chats named 'New chat' deleted, {skipped} other chats skipped")
     
     except Exception as e:
         logger.error(f"❌ Cleanup failed: {e}", exc_info=True)

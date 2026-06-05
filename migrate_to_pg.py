@@ -20,7 +20,7 @@
 # GNU General Public License for more details.
 #
 # You should have received a copy of the GNU General Public License
-# along with this program. If not, see <https://www.gnu.org/>.
+# along with this program. If not, see <https://www.gnu.org/licenses/>.
 #
 """
 Universal Migration Script: chat_state.json & tokens.json → PostgreSQL.
@@ -31,12 +31,13 @@ Usage:
 Features:
     • Auto-detects chat_state.json and tokens.json
     • Migrates both to their respective PostgreSQL databases
-    • Creates databases, users, tables automatically
+    • Creates databases, users, tables automatically (EVEN IF JSON FILES ARE MISSING)
     • Supports legacy and new JSON formats
     • Idempotent: safe to run multiple times
     • Secure: uses parameterized queries, no passwords in CLI args
     • 🔧 UPDATED: Supports composite primary key (openweb_id, model) for chat_state isolation
     • 🔧 UPDATED: Auto-migrates existing tables to new schema (adds model column, updates PK)
+    • 🔧 UPDATED: Creates databases and tables even if source JSON files are absent
 """
 import os
 import sys
@@ -305,7 +306,7 @@ async def _ensure_chat_state_schema(conn, table_name: str) -> bool:
 
 async def migrate_chat_state(target: MigrationTarget, socket_dir: Optional[str]) -> int:
     """Migrate chat_state.json to PostgreSQL with composite key support."""
-    logger.info(f"🚀 Migrating {target.description}...")
+    logger.info(f"🚀 Setting up {target.description}...")
 
     try:
         conn = await connect_target(target, socket_dir)
@@ -337,6 +338,11 @@ async def migrate_chat_state(target: MigrationTarget, socket_dir: Optional[str])
             CREATE INDEX IF NOT EXISTS idx_{target.db_table}_updated
             ON {target.db_table}(updated_at)
         """)
+
+        # 🔧 Check if JSON file exists — if not, just ensure DB structure and exit
+        if not target.json_path.exists():
+            logger.info(f"ℹ️  {target.json_path} not found. Database and table created, skipping data migration.")
+            return 0
 
         # Load JSON
         with open(target.json_path, "r", encoding="utf-8") as f:
@@ -405,7 +411,7 @@ async def migrate_chat_state(target: MigrationTarget, socket_dir: Optional[str])
 
 async def migrate_tokens(target: MigrationTarget, socket_dir: Optional[str]) -> int:
     """Migrate tokens.json to PostgreSQL - FULL MIRROR MODE"""
-    logger.info(f"🚀 Migrating {target.description}...")
+    logger.info(f"🚀 Setting up {target.description}...")
 
     try:
         conn = await connect_target(target, socket_dir)
@@ -415,7 +421,7 @@ async def migrate_tokens(target: MigrationTarget, socket_dir: Optional[str]) -> 
 
     try:
         # ✅ Create a table with raw_data JSONB for FULL storage of the object
-        logger.info(f"📋 Creating table '{target.db_table}'...")
+        logger.info(f"📋 Ensuring table '{target.db_table}' exists...")
         await conn.execute(f"""
             CREATE TABLE IF NOT EXISTS {target.db_table} (
                 id TEXT PRIMARY KEY,
@@ -429,6 +435,11 @@ async def migrate_tokens(target: MigrationTarget, socket_dir: Optional[str]) -> 
             CREATE INDEX IF NOT EXISTS idx_{target.db_table}_updated 
             ON {target.db_table}(updated_at)
         """)
+
+        # 🔧 Check if JSON file exists — if not, just ensure DB structure and exit
+        if not target.json_path.exists():
+            logger.info(f"ℹ️  {target.json_path} not found. Database and table created, skipping data migration.")
+            return 0
 
         # Load JSON
         with open(target.json_path, "r", encoding="utf-8") as f:
@@ -490,11 +501,10 @@ async def main():
     logger.info("🚀 Universal Migration Tool: JSON → PostgreSQL")
     logger.info(f"📁 Script dir: {SCRIPT_DIR}")
 
-    targets: List[MigrationTarget] = []
-
-    # Detect chat_state
-    if CHAT_STATE_JSON.exists():
-        targets.append(MigrationTarget(
+    # 🔧 ALWAYS add both targets — databases and tables must be created
+    # regardless of whether JSON files exist
+    targets: List[MigrationTarget] = [
+        MigrationTarget(
             name="chat_state",
             json_path=CHAT_STATE_JSON,
             db_name=CS_DB_NAME,
@@ -502,14 +512,8 @@ async def main():
             db_password=CS_DB_PASSWORD,
             db_table=CS_DB_TABLE,
             description="Chat State"
-        ))
-        logger.info(f"📂 Found {CHAT_STATE_JSON}")
-    else:
-        logger.info(f"ℹ️  {CHAT_STATE_JSON} not found, skipping chat state migration.")
-
-    # Detect tokens
-    if TOKENS_JSON.exists():
-        targets.append(MigrationTarget(
+        ),
+        MigrationTarget(
             name="tokens",
             json_path=TOKENS_JSON,
             db_name=TK_DB_NAME,
@@ -517,15 +521,15 @@ async def main():
             db_password=TK_DB_PASSWORD,
             db_table=TK_DB_TABLE,
             description="Tokens"
-        ))
-        logger.info(f"📂 Found {TOKENS_JSON}")
-    else:
-        logger.info(f"ℹ️  {TOKENS_JSON} not found, skipping tokens migration.")
+        ),
+    ]
 
-    if not targets:
-        logger.error("❌ No JSON files found to migrate.")
-        logger.error(f"💡 Ensure {CHAT_STATE_JSON} or {TOKENS_JSON} exist.")
-        sys.exit(1)
+    # Log which JSON files were found
+    for t in targets:
+        if t.json_path.exists():
+            logger.info(f"📂 Found {t.json_path}")
+        else:
+            logger.info(f"ℹ️  {t.json_path} not found — will create DB/table only (no data migration)")
 
     # Find socket
     socket_dir = await find_socket_dir()
@@ -543,7 +547,7 @@ async def main():
         finally:
             await super_conn.close()
 
-        # Step 2: Migrate data
+        # Step 2: Migrate data (or just create tables if JSON is missing)
         total_migrated = 0
         for target in targets:
             if target.name == "chat_state":
@@ -553,7 +557,7 @@ async def main():
 
         # Summary
         logger.info("=" * 60)
-        logger.info("🎉 MIGRATION COMPLETE")
+        logger.info("🎉 SETUP COMPLETE")
         logger.info("=" * 60)
         logger.info(f"📊 Total records migrated: {total_migrated}")
         logger.info("💡 Update your .env:")

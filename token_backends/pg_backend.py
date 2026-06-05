@@ -60,7 +60,7 @@ class PgTokenBackend(TokenBackend):
         self.table = table
         self.ssl_mode = ssl_mode
         self.pool: Optional[pool.ThreadedConnectionPool] = None
-        # Кэш: {token_id: TokenData}
+        # Cache: {token_id: TokenData}
         self._cache: Dict[str, TokenData] = {}
         self._loaded: bool = False
 
@@ -83,7 +83,7 @@ class PgTokenBackend(TokenBackend):
             await asyncio.to_thread(self._ensure_table)
 
             logger.info(f"🗄 Creating Token Storage DB pool: {Config.TOKEN_DB_HOST}:{Config.TOKEN_DB_PORT}/{Config.TOKEN_DB_NAME}")
-            logger.info(f"🗄 Token Storage DB pool created (min={Config.TOKEN_DB_POOL_MIN}, max={Config.TOKEN_DB_POOL_MAX}")
+            logger.info(f"🗄 Token Storage DB pool created (min={Config.TOKEN_DB_POOL_MIN}, max={Config.TOKEN_DB_POOL_MAX})")
             return True
 
         except Exception as e:
@@ -110,10 +110,28 @@ class PgTokenBackend(TokenBackend):
                         last_used_at TIMESTAMPTZ DEFAULT NOW()
                     )
                 """)
-                cur.execute(f"""
-                    CREATE INDEX IF NOT EXISTS idx_{self.table}_updated 
-                    ON {self.table}(updated_at)
-                """)
+                
+                # 🔧 Wrap index creation in try/except to handle race conditions
+                try:
+                    cur.execute(f"""
+                        CREATE INDEX IF NOT EXISTS idx_{self.table}_updated 
+                        ON {self.table}(updated_at)
+                    """)
+                except psycopg2.errors.UniqueViolation as e:
+                    logger.debug(f"⚡ Index idx_{self.table}_updated already exists (race, safe): {e}")
+                    conn.rollback()
+                except psycopg2.errors.DuplicateTable as e:
+                    logger.debug(f"⚡ Index idx_{self.table}_updated already exists (race, safe): {e}")
+                    conn.rollback()
+                except Exception as e:
+                    # Check if it's a duplicate error in the message
+                    err_msg = str(e).lower()
+                    if "повторяющееся" in err_msg or "duplicate" in err_msg or "already exists" in err_msg:
+                        logger.debug(f"⚡ Index idx_{self.table}_updated already exists (race, safe)")
+                        conn.rollback()
+                    else:
+                        raise
+                
             conn.commit()
         except Exception as e:
             conn.rollback()
@@ -140,7 +158,7 @@ class PgTokenBackend(TokenBackend):
         rows = await asyncio.to_thread(self._fetch_all_rows)
 
         for token_id, raw_data in rows:
-            # ✅ Конвертируем raw_data (dict) -> TokenData
+            # ✅ Convert raw_data (dict) -> TokenData
             token = TokenData.from_dict(raw_data)
             self._cache[token.id] = token
 

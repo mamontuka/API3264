@@ -120,236 +120,425 @@ async def lifespan(app: FastAPI):
     - Startup: Auto-migration + Init backends + DB pools
     - Shutdown: Close all resources
     """
-    # 🔧 STEP 1: Embeded postgre migration
+    # 🔧 STEP 1: Embeded postgre migration (with file lock to prevent race conditions)
     if getattr(Config, "ENABLE_AUTO_MIGRATION", True):
         logger.info("🔧 Running inline database migration...")
         try:
             import asyncpg
             import json
+            import subprocess
+            import fcntl
             from pathlib import Path
 
-            async def _run_migration_for(db_cfg: dict, json_file: Path, table: str, name: str, is_tokens: bool = False):
-                """Universal migration function with debug logs."""
-                if not json_file.exists():
-                    logger.warning(f"⚠️ {json_file.name} NOT FOUND at {json_file}")
-                    return
-                
-                logger.info(f"🚀 Migrating {name} from {json_file}...")
-                
-                # Connecting to the database
-                conn = await asyncpg.connect(
-                    host=db_cfg["host"], port=db_cfg.get("port", 5432),
-                    database=db_cfg["db"], user=db_cfg["user"], password=db_cfg["pass"]
-                )
-                try:
-                    # 1. Create a scheme (Chat State only)
-                    if not is_tokens:
-                        # Create table if not exists
-                        await conn.execute(f"""
-                            CREATE TABLE IF NOT EXISTS {table} (
-                                openweb_id TEXT NOT NULL, qwen_chat_id TEXT NOT NULL,
-                                last_parent_id TEXT, is_new BOOLEAN DEFAULT FALSE, 
-                                created_at DOUBLE PRECISION, updated_at TIMESTAMP DEFAULT NOW(),
-                                PRIMARY KEY (openweb_id)
-                            )
-                        """)
-                        
-                        # 🔥 CHECK: Is there a 'model' column? If not, add it.
-                        column_exists = await conn.fetchval("""
-                            SELECT 1 FROM information_schema.columns 
-                            WHERE table_schema = 'public' AND table_name = $1 AND column_name = 'model'
-                        """, table)
-                        
-                        if not column_exists:
-                            logger.info(f"🔧 Adding 'model' column to {table}...")
-                            try:
-                                await conn.execute(f"ALTER TABLE {table} ADD COLUMN model TEXT DEFAULT ''")
-                            except asyncpg.exceptions.DuplicateColumnError:
-                                # Another worker has already added a column - this is a normal race
-                                logger.debug(f"⚡ Column 'model' already exists in {table} (parallel run, safe)")
-                            except Exception as e:
-                                # Any other error is a real problem.
-                                logger.error(f"❌ Failed to add 'model' column: {e}")
-                                raise
-                        
-                        # 🔥 CHECK: Do I need to change the PK to a composite one?
-                        pk_info = await conn.fetchrow("""
-                            SELECT string_agg(column_name, ',' ORDER BY ordinal_position) as pk_cols,
-                                   constraint_name
-                            FROM information_schema.key_column_usage
-                            WHERE table_schema = 'public' AND table_name = $1 
-                            AND constraint_name LIKE '%_pkey'
-                            GROUP BY constraint_name
-                        """, table)
-                        
-                        if pk_info and pk_info['pk_cols'] == 'openweb_id':
-                            logger.info(f"🔧 Migrating PK on {table} to composite (openweb_id, model)...")
-                            try:
-                                # Normalize existing NULLs in the model before changing the key
-                                await conn.execute(f"UPDATE {table} SET model = '' WHERE model IS NULL")
-                                
-                                # We are trying to recreate the PK
-                                constraint_name = pk_info['constraint_name']
-                                await conn.execute(f"ALTER TABLE {table} DROP CONSTRAINT {constraint_name}")
-                                await conn.execute(f"ALTER TABLE {table} ADD PRIMARY KEY (openweb_id, model)")
-                                
-                            except asyncpg.exceptions.UndefinedObjectError as e:
-                                # 🔥 MOST IMPORTANT: If the restriction has already been removed by another worker, it's OK
-                                # We check the error text for the presence of "does not exist" or "does not exist" markers.
-                                err_msg = str(e).lower()
-                                if "не существует" in err_msg or "does not exist" in err_msg:
-                                    logger.debug(f"⚡ PK constraint '{constraint_name}' already dropped by another worker (safe race condition)")
-                                else:
-                                    # If the error is different, we actually drop it.
-                                    raise
-                                    
-                            except asyncpg.exceptions.InvalidTableDefinitionError:
-                                # PK has already been changed to a composite by another worker - this is also OK
-                                logger.debug(f"⚡ PK already migrated to composite by another worker (safe race condition)")
-                                
-                            except Exception as e:
-                                # Any other unexpected error
-                                logger.error(f"❌ Failed to migrate PK: {e}")
-                                raise
-                        
-                        # Index checking (race protection)
-                        index_exists = await conn.fetchval("""
-                            SELECT 1 FROM pg_indexes 
-                            WHERE tablename = $1 AND indexname = $2
-                        """, table, f"idx_{table}_upd")
-                        
-                        if not index_exists:
-                            try:
-                                await conn.execute(f"CREATE INDEX idx_{table}_upd ON {table}(updated_at)")
-                            except asyncpg.exceptions.UniqueViolationError:
-                                pass
-                    else:
-                        # Token scheme
-                        await conn.execute(f"""
-                            CREATE TABLE IF NOT EXISTS {table} (
-                                id TEXT PRIMARY KEY, raw_data JSONB NOT NULL,
-                                created_at TIMESTAMPTZ DEFAULT NOW(),
-                                updated_at TIMESTAMPTZ DEFAULT NOW(),
-                                last_used_at TIMESTAMPTZ DEFAULT NOW()
-                            )
-                        """)
-                    
-                    # 2. Loading and DEBUG format
-                    with open(json_file, "r", encoding="utf-8") as f:
-                        data = json.load(f)
-                    
-                    logger.debug(f"🔍 {name}: JSON type={type(data).__name__}, len={len(data) if hasattr(data, '__len__') else 'N/A'}")
-                    if isinstance(data, dict) and data:
-                        first_key, first_val = next(iter(data.items()))
-                        logger.debug(f"🔍 {name}: Sample key='{first_key[:10]}...', val_type={type(first_val).__name__}, val_keys={list(first_val.keys()) if isinstance(first_val, dict) else 'N/A'}")
-                    elif isinstance(data, list) and data:
-                        logger.debug(f"🔍 {name}: Sample item keys={list(data[0].keys()) if isinstance(data[0], dict) else 'N/A'}")
-                    
-                    # 3. Record parsing (universal + debug)
-                    records_to_migrate = []
-                    
-                    if isinstance(data, dict):
-                        for key, val in data.items():
-                            records_to_migrate.append((key, val))
-                    elif isinstance(data, list):
-                        for item in data:
-                            if isinstance(item, dict):
-                                record_id = item.get("openweb_id") or item.get("id")
-                                if record_id:
-                                    records_to_migrate.append((record_id, item))
-                    else:
-                        logger.error(f"❌ {name}: Unknown JSON format {type(data)}")
-                        return
-
-                    logger.info(f"📦 {name}: Parsed {len(records_to_migrate)} potential records")
-                    
-                    # 🔥 DEBUG: We'll show the first 3 entries to understand the format.
-                    for i, (rid, rval) in enumerate(records_to_migrate[:3]):
-                        logger.debug(f"🔍 {name}[{i}]: id='{rid[:10]}...', type={type(rval).__name__}, content={str(rval)[:200]}")
-
-                    # 4. UPSERT loop
-                    count = 0
-                    skipped = 0
-                    for record_id, record_val in records_to_migrate:
-                        try:
-                            if not is_tokens:
-                                # === Chat State Logic ===
-                                qwen_id = None
-                                
-                                # 🔥 Universal extraction of qwen_chat_id from any format
-                                if isinstance(record_val, str):
-                                    # Format 1: Just a string with an ID
-                                    qwen_id = record_val
-                                elif isinstance(record_val, dict):
-                                    # Format 2: Dictionary with qwen_chat_id field
-                                    qwen_id = record_val.get("qwen_chat_id")
-                                    # Format 3: A dictionary where the value itself is an ID (legacy)
-                                    if not qwen_id and len(record_val) == 1:
-                                        qwen_id = next(iter(record_val.values()), None)
-                                    # Format 4: The field is simply called "chat_id"
-                                    if not qwen_id:
-                                        qwen_id = record_val.get("chat_id")
-                                
-                                if not qwen_id:
-                                    skipped += 1
-                                    if skipped <= 3:
-                                        logger.warning(f"⚠️ {name}: Skipping {record_id[:10]}... (no qwen_chat_id found, val={record_val})")
-                                    continue
-                                    
-                                lp_id = None
-                                is_new = False
-                                created = 0.0
-                                model = ""
-                                
-                                if isinstance(record_val, dict):
-                                    lp_id = record_val.get("last_parent_id")
-                                    is_new = record_val.get("is_new", False)
-                                    created = record_val.get("created_at", 0.0)
-                                    model = record_val.get("model", "") or ""
-                                
-                                await conn.execute(f"""
-                                    INSERT INTO {table} (openweb_id, model, qwen_chat_id, last_parent_id, is_new, created_at, updated_at)
-                                    VALUES ($1, $2, $3, $4, $5, $6, NOW())
-                                    ON CONFLICT (openweb_id, model) DO UPDATE SET
-                                        qwen_chat_id = EXCLUDED.qwen_chat_id, last_parent_id = EXCLUDED.last_parent_id,
-                                        is_new = EXCLUDED.is_new, created_at = EXCLUDED.created_at, updated_at = NOW()
-                                """, record_id, model, qwen_id, lp_id, is_new, created)
-                            
-                            else:
-                                # === Tokens Logic ===
-                                await conn.execute(f"""
-                                    INSERT INTO {table} (id, raw_data, created_at, updated_at, last_used_at)
-                                    VALUES ($1, $2, NOW(), NOW(), NOW())
-                                    ON CONFLICT (id) DO UPDATE SET 
-                                        raw_data = EXCLUDED.raw_data, updated_at = NOW()
-                                """, record_id, json.dumps(record_val, ensure_ascii=False))
-                            
-                            count += 1
-                        except Exception as e:
-                            logger.warning(f"⚠️ {name}: Error processing {record_id}: {e}")
-                            skipped += 1
-                    
-                    # 🔥 FINAL REPORT
-                    logger.info(f"✅ {name}: {count} migrated, {skipped} skipped.")
-
-                finally:
-                    await conn.close()
-
-            # === LAUNCHING MIGRATIONS ===
+            # ============================================================
+            # 🔧 FILE LOCK: Only one worker runs migration
+            # ============================================================
+            lock_file = Config.SESSION_DIR / ".migration.lock"
+            lock_fd = open(lock_file, 'w')
             
-            # 1. Chat State
-            await _run_migration_for({
-                "host": Config.CHAT_STATE_DB_HOST, "port": Config.CHAT_STATE_DB_PORT,
-                "db": Config.CHAT_STATE_DB_NAME, "user": Config.CHAT_STATE_DB_USER, "pass": Config.CHAT_STATE_DB_PASSWORD
-            }, Config.SESSION_DIR / "chat_state.json", Config.CHAT_STATE_DB_TABLE, "Chat State", is_tokens=False)
+            try:
+                # Try to acquire lock (non-blocking)
+                fcntl.flock(lock_fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                is_migration_leader = True
+                logger.info("🔒 This worker is migration leader")
+            except (IOError, OSError):
+                # Another worker has the lock
+                is_migration_leader = False
+                logger.info("⏳ Another worker is running migration, waiting...")
+                # Wait for lock (blocking)
+                fcntl.flock(lock_fd.fileno(), fcntl.LOCK_EX)
+                logger.info("✅ Migration completed by another worker, skipping...")
+                lock_fd.close()
+                is_migration_leader = False
 
-            # 2. Tokens
-            await _run_migration_for({
-                "host": Config.TOKEN_DB_HOST, "port": Config.TOKEN_DB_PORT,
-                "db": Config.TOKEN_DB_NAME, "user": Config.TOKEN_DB_USER, "pass": Config.TOKEN_DB_PASSWORD
-            }, Config.SESSION_DIR / "tokens.json", Config.TOKEN_DB_TABLE, "Tokens", is_tokens=True)
+            if is_migration_leader:
+                try:
+                    # ============================================================
+                    # 🔧 Ensure database and user exist before migration
+                    # ============================================================
+                    async def _ensure_database_exists(db_cfg: dict, name: str):
+                        """
+                        Create database and role using multiple methods:
+                        1. sudo -u postgres psql (for peer auth) - PRIMARY METHOD
+                        2. asyncpg via TCP 127.0.0.1 (for md5/scram)
+                        3. asyncpg via socket (if process runs as postgres)
+                        """
+                        db_name = db_cfg["db"]
+                        db_user = db_cfg["user"]
+                        db_pass = db_cfg["pass"]
+                        
+                        logger.info(f"🔧 Ensuring database '{db_name}' exists for {name}...")
+                        
+                        # ================================================================
+                        # METHOD 1: sudo -u postgres psql (works with peer auth)
+                        # ================================================================
+                        try:
+                            # Suppress perl locale warnings
+                            env = os.environ.copy()
+                            env["LC_ALL"] = "C"
+                            env["LANG"] = "C"
+                            
+                            check_result = subprocess.run(
+                                ["sudo", "-n", "-u", "postgres", "psql", "-tAc",
+                                 f"SELECT 1 FROM pg_database WHERE datname='{db_name}'"],
+                                capture_output=True, text=True, timeout=10, env=env
+                            )
+                            
+                            if check_result.returncode == 0:
+                                db_exists = check_result.stdout.strip() == "1"
+                                
+                                if not db_exists:
+                                    # Check/create role
+                                    role_check = subprocess.run(
+                                        ["sudo", "-n", "-u", "postgres", "psql", "-tAc",
+                                         f"SELECT 1 FROM pg_roles WHERE rolname='{db_user}'"],
+                                        capture_output=True, text=True, timeout=10, env=env
+                                    )
+                                    
+                                    if role_check.stdout.strip() != "1":
+                                        logger.info(f"➕ Creating role '{db_user}' via sudo psql...")
+                                        subprocess.run(
+                                            ["sudo", "-n", "-u", "postgres", "psql", "-c",
+                                             f"CREATE ROLE \"{db_user}\" WITH LOGIN PASSWORD '{db_pass}'"],
+                                            capture_output=True, text=True, timeout=10, env=env
+                                        )
+                                    
+                                    logger.info(f"➕ Creating database '{db_name}' via sudo psql...")
+                                    create_result = subprocess.run(
+                                        ["sudo", "-n", "-u", "postgres", "psql", "-c",
+                                         f"CREATE DATABASE \"{db_name}\" OWNER \"{db_user}\""],
+                                        capture_output=True, text=True, timeout=10, env=env
+                                    )
+                                    
+                                    if create_result.returncode != 0:
+                                        # Check if it's a duplicate error (race condition)
+                                        if "повторяющееся" in create_result.stderr or "duplicate" in create_result.stderr.lower():
+                                            logger.debug(f"⚡ Database '{db_name}' already exists (race, safe)")
+                                        else:
+                                            logger.error(f"❌ Failed to create database: {create_result.stderr}")
+                                    else:
+                                        logger.info(f"✅ Database '{db_name}' created successfully")
+                                    
+                                    # Grant privileges
+                                    subprocess.run(
+                                        ["sudo", "-n", "-u", "postgres", "psql", "-c",
+                                         f"GRANT ALL PRIVILEGES ON DATABASE \"{db_name}\" TO \"{db_user}\""],
+                                        capture_output=True, text=True, timeout=10, env=env
+                                    )
+                                else:
+                                    logger.debug(f"✅ Database '{db_name}' already exists")
+                                
+                                return  # Success, exit function
+                            
+                        except FileNotFoundError:
+                            logger.debug("sudo not found, trying next method...")
+                        except subprocess.TimeoutExpired:
+                            logger.debug("sudo psql timeout, trying next method...")
+                        except Exception as e:
+                            logger.debug(f"sudo psql failed: {e}, trying next method...")
+                        
+                        # ================================================================
+                        # METHOD 2: asyncpg via TCP 127.0.0.1 (for md5/scram auth)
+                        # ================================================================
+                        try:
+                            conn = await asyncpg.connect(
+                                host="127.0.0.1", port=db_cfg.get("port", 5432),
+                                database="postgres", user=os.getenv("PG_SUPERUSER", "postgres"),
+                                password=os.getenv("PG_SUPERUSER_PASSWORD", "")
+                            )
+                            try:
+                                db_exists = await conn.fetchval(
+                                    "SELECT 1 FROM pg_database WHERE datname = $1", db_name
+                                )
+                                
+                                if not db_exists:
+                                    role_exists = await conn.fetchval(
+                                        "SELECT 1 FROM pg_roles WHERE rolname = $1", db_user
+                                    )
+                                    if not role_exists:
+                                        logger.info(f"➕ Creating role '{db_user}' via TCP...")
+                                        await conn.execute(
+                                            f'CREATE ROLE "{db_user}" WITH LOGIN PASSWORD $1', db_pass
+                                        )
+                                    
+                                    logger.info(f"➕ Creating database '{db_name}' via TCP...")
+                                    try:
+                                        await conn.execute(f'CREATE DATABASE "{db_name}" OWNER "{db_user}"')
+                                        logger.info(f"✅ Database '{db_name}' created")
+                                    except asyncpg.exceptions.DuplicateDatabaseError:
+                                        logger.debug(f"⚡ Database '{db_name}' already exists (race, safe)")
+                                    
+                                    await conn.execute(
+                                        f'GRANT ALL PRIVILEGES ON DATABASE "{db_name}" TO "{db_user}"'
+                                    )
+                                else:
+                                    logger.debug(f"✅ Database '{db_name}' already exists")
+                            finally:
+                                await conn.close()
+                            
+                            return  # Success
+                        
+                        except Exception as e:
+                            logger.debug(f"TCP 127.0.0.1 failed: {e}")
+                        
+                        # ================================================================
+                        # METHOD 3: asyncpg via socket (if process runs as postgres)
+                        # ================================================================
+                        for socket_dir in ["/var/run/postgresql", "/tmp"]:
+                            if not os.path.isdir(socket_dir):
+                                continue
+                            try:
+                                conn = await asyncpg.connect(
+                                    host=socket_dir, database="postgres",
+                                    user=os.getenv("PG_SUPERUSER", "postgres")
+                                )
+                                try:
+                                    db_exists = await conn.fetchval(
+                                        "SELECT 1 FROM pg_database WHERE datname = $1", db_name
+                                    )
+                                    
+                                    if not db_exists:
+                                        role_exists = await conn.fetchval(
+                                            "SELECT 1 FROM pg_roles WHERE rolname = $1", db_user
+                                        )
+                                        if not role_exists:
+                                            await conn.execute(
+                                                f'CREATE ROLE "{db_user}" WITH LOGIN PASSWORD $1', db_pass
+                                            )
+                                        
+                                        try:
+                                            await conn.execute(f'CREATE DATABASE "{db_name}" OWNER "{db_user}"')
+                                            logger.info(f"✅ Database '{db_name}' created via socket")
+                                        except asyncpg.exceptions.DuplicateDatabaseError:
+                                            logger.debug(f"⚡ Database '{db_name}' already exists (race, safe)")
+                                        
+                                        await conn.execute(
+                                            f'GRANT ALL PRIVILEGES ON DATABASE "{db_name}" TO "{db_user}"'
+                                        )
+                                    else:
+                                        logger.debug(f"✅ Database '{db_name}' already exists")
+                                finally:
+                                    await conn.close()
+                                
+                                return  # Success
+                            
+                            except Exception as e:
+                                logger.debug(f"Socket {socket_dir} failed: {e}")
+                        
+                        logger.warning(f"⚠️ Could not create database '{db_name}'. Assuming it exists.")
 
-            logger.info("✅ Inline migration completed successfully.")
+                    # ============================================================
+                    # Universal migration function (DB + table + data)
+                    # ============================================================
+                    async def _run_migration_for(db_cfg: dict, json_file: Path, table: str, name: str, is_tokens: bool = False):
+                        """Universal migration function with debug logs."""
+
+                        # 🔧 FIRST: Ensure database and user exist (BEFORE connecting to target DB)
+                        await _ensure_database_exists(db_cfg, name)
+
+                        # 🔧 Connect to target database (now it definitely exists)
+                        logger.info(f"🚀 Setting up {name} (db={db_cfg['db']}, table={table})...")
+                        try:
+                            conn = await asyncpg.connect(
+                                host=db_cfg["host"], port=db_cfg.get("port", 5432),
+                                database=db_cfg["db"], user=db_cfg["user"], password=db_cfg["pass"]
+                            )
+                        except Exception as e:
+                            logger.error(f"❌ Cannot connect to {db_cfg['db']} for {name}: {e}")
+                            return
+
+                        try:
+                            # 1. Create a scheme (Chat State only)
+                            if not is_tokens:
+                                # Create table if not exists
+                                await conn.execute(f"""
+                                    CREATE TABLE IF NOT EXISTS {table} (
+                                        openweb_id TEXT NOT NULL, qwen_chat_id TEXT NOT NULL,
+                                        last_parent_id TEXT, is_new BOOLEAN DEFAULT FALSE, 
+                                        created_at DOUBLE PRECISION, updated_at TIMESTAMP DEFAULT NOW(),
+                                        PRIMARY KEY (openweb_id)
+                                    )
+                                """)
+                                
+                                # 🔥 CHECK: Is there a 'model' column? If not, add it.
+                                column_exists = await conn.fetchval("""
+                                    SELECT 1 FROM information_schema.columns 
+                                    WHERE table_schema = 'public' AND table_name = $1 AND column_name = 'model'
+                                """, table)
+                                
+                                if not column_exists:
+                                    logger.info(f"🔧 Adding 'model' column to {table}...")
+                                    try:
+                                        await conn.execute(f"ALTER TABLE {table} ADD COLUMN model TEXT DEFAULT ''")
+                                    except asyncpg.exceptions.DuplicateColumnError:
+                                        logger.debug(f"⚡ Column 'model' already exists in {table} (parallel run, safe)")
+                                    except Exception as e:
+                                        logger.error(f"❌ Failed to add 'model' column: {e}")
+                                        raise
+                                
+                                # 🔥 CHECK: Do I need to change the PK to a composite one?
+                                pk_info = await conn.fetchrow("""
+                                    SELECT string_agg(column_name, ',' ORDER BY ordinal_position) as pk_cols,
+                                           constraint_name
+                                    FROM information_schema.key_column_usage
+                                    WHERE table_schema = 'public' AND table_name = $1 
+                                    AND constraint_name LIKE '%_pkey'
+                                    GROUP BY constraint_name
+                                """, table)
+                                
+                                if pk_info and pk_info['pk_cols'] == 'openweb_id':
+                                    logger.info(f"🔧 Migrating PK on {table} to composite (openweb_id, model)...")
+                                    try:
+                                        await conn.execute(f"UPDATE {table} SET model = '' WHERE model IS NULL")
+                                        constraint_name = pk_info['constraint_name']
+                                        await conn.execute(f"ALTER TABLE {table} DROP CONSTRAINT {constraint_name}")
+                                        await conn.execute(f"ALTER TABLE {table} ADD PRIMARY KEY (openweb_id, model)")
+                                    except asyncpg.exceptions.UndefinedObjectError as e:
+                                        err_msg = str(e).lower()
+                                        if "не существует" in err_msg or "does not exist" in err_msg:
+                                            logger.debug(f"⚡ PK constraint '{constraint_name}' already dropped by another worker (safe race condition)")
+                                        else:
+                                            raise
+                                    except asyncpg.exceptions.InvalidTableDefinitionError:
+                                        logger.debug(f"⚡ PK already migrated to composite by another worker (safe race condition)")
+                                    except Exception as e:
+                                        logger.error(f"❌ Failed to migrate PK: {e}")
+                                        raise
+                                
+                                # 🔧 REMOVED: Index creation - let backend handle it during initialization
+                                # This prevents race conditions between migration and backend init
+                            else:
+                                # Token scheme
+                                await conn.execute(f"""
+                                    CREATE TABLE IF NOT EXISTS {table} (
+                                        id TEXT PRIMARY KEY, raw_data JSONB NOT NULL,
+                                        created_at TIMESTAMPTZ DEFAULT NOW(),
+                                        updated_at TIMESTAMPTZ DEFAULT NOW(),
+                                        last_used_at TIMESTAMPTZ DEFAULT NOW()
+                                    )
+                                """)
+
+                            # 🔧 CHECK: JSON file exists? If not — DB/table are ready, skip data migration
+                            if not json_file.exists():
+                                logger.info(f"ℹ️  {json_file.name} not found at {json_file}. "
+                                            f"Database and table for {name} are ready, skipping data migration.")
+                                return
+
+                            # 2. Loading and DEBUG format
+                            with open(json_file, "r", encoding="utf-8") as f:
+                                data = json.load(f)
+                            
+                            logger.debug(f"🔍 {name}: JSON type={type(data).__name__}, len={len(data) if hasattr(data, '__len__') else 'N/A'}")
+                            if isinstance(data, dict) and data:
+                                first_key, first_val = next(iter(data.items()))
+                                logger.debug(f"🔍 {name}: Sample key='{first_key[:10]}...', val_type={type(first_val).__name__}, val_keys={list(first_val.keys()) if isinstance(first_val, dict) else 'N/A'}")
+                            elif isinstance(data, list) and data:
+                                logger.debug(f"🔍 {name}: Sample item keys={list(data[0].keys()) if isinstance(data[0], dict) else 'N/A'}")
+                            
+                            # 3. Record parsing (universal + debug)
+                            records_to_migrate = []
+                            
+                            if isinstance(data, dict):
+                                for key, val in data.items():
+                                    records_to_migrate.append((key, val))
+                            elif isinstance(data, list):
+                                for item in data:
+                                    if isinstance(item, dict):
+                                        record_id = item.get("openweb_id") or item.get("id")
+                                        if record_id:
+                                            records_to_migrate.append((record_id, item))
+                            else:
+                                logger.error(f"❌ {name}: Unknown JSON format {type(data)}")
+                                return
+
+                            logger.info(f"📦 {name}: Parsed {len(records_to_migrate)} potential records")
+                            
+                            for i, (rid, rval) in enumerate(records_to_migrate[:3]):
+                                logger.debug(f"🔍 {name}[{i}]: id='{rid[:10]}...', type={type(rval).__name__}, content={str(rval)[:200]}")
+
+                            # 4. UPSERT loop
+                            count = 0
+                            skipped = 0
+                            for record_id, record_val in records_to_migrate:
+                                try:
+                                    if not is_tokens:
+                                        qwen_id = None
+                                        if isinstance(record_val, str):
+                                            qwen_id = record_val
+                                        elif isinstance(record_val, dict):
+                                            qwen_id = record_val.get("qwen_chat_id")
+                                            if not qwen_id and len(record_val) == 1:
+                                                qwen_id = next(iter(record_val.values()), None)
+                                            if not qwen_id:
+                                                qwen_id = record_val.get("chat_id")
+                                        
+                                        if not qwen_id:
+                                            skipped += 1
+                                            if skipped <= 3:
+                                                logger.warning(f"⚠️ {name}: Skipping {record_id[:10]}... (no qwen_chat_id found, val={record_val})")
+                                            continue
+                                            
+                                        lp_id = None
+                                        is_new = False
+                                        created = 0.0
+                                        model = ""
+                                        
+                                        if isinstance(record_val, dict):
+                                            lp_id = record_val.get("last_parent_id")
+                                            is_new = record_val.get("is_new", False)
+                                            created = record_val.get("created_at", 0.0)
+                                            model = record_val.get("model", "") or ""
+                                        
+                                        await conn.execute(f"""
+                                            INSERT INTO {table} (openweb_id, model, qwen_chat_id, last_parent_id, is_new, created_at, updated_at)
+                                            VALUES ($1, $2, $3, $4, $5, $6, NOW())
+                                            ON CONFLICT (openweb_id, model) DO UPDATE SET
+                                                qwen_chat_id = EXCLUDED.qwen_chat_id, last_parent_id = EXCLUDED.last_parent_id,
+                                                is_new = EXCLUDED.is_new, created_at = EXCLUDED.created_at, updated_at = NOW()
+                                        """, record_id, model, qwen_id, lp_id, is_new, created)
+                                    
+                                    else:
+                                        await conn.execute(f"""
+                                            INSERT INTO {table} (id, raw_data, created_at, updated_at, last_used_at)
+                                            VALUES ($1, $2, NOW(), NOW(), NOW())
+                                            ON CONFLICT (id) DO UPDATE SET 
+                                                raw_data = EXCLUDED.raw_data, updated_at = NOW()
+                                        """, record_id, json.dumps(record_val, ensure_ascii=False))
+                                    
+                                    count += 1
+                                except Exception as e:
+                                    logger.warning(f"⚠️ {name}: Error processing {record_id}: {e}")
+                                    skipped += 1
+                            
+                            logger.info(f"✅ {name}: {count} migrated, {skipped} skipped.")
+
+                        finally:
+                            await conn.close()
+
+                    # === LAUNCHING MIGRATIONS ===
+                    
+                    # 1. Chat State
+                    await _run_migration_for({
+                        "host": Config.CHAT_STATE_DB_HOST, "port": Config.CHAT_STATE_DB_PORT,
+                        "db": Config.CHAT_STATE_DB_NAME, "user": Config.CHAT_STATE_DB_USER, "pass": Config.CHAT_STATE_DB_PASSWORD
+                    }, Config.SESSION_DIR / "chat_state.json", Config.CHAT_STATE_DB_TABLE, "Chat State", is_tokens=False)
+
+                    # 2. Tokens
+                    await _run_migration_for({
+                        "host": Config.TOKEN_DB_HOST, "port": Config.TOKEN_DB_PORT,
+                        "db": Config.TOKEN_DB_NAME, "user": Config.TOKEN_DB_USER, "pass": Config.TOKEN_DB_PASSWORD
+                    }, Config.SESSION_DIR / "tokens.json", Config.TOKEN_DB_TABLE, "Tokens", is_tokens=True)
+
+                    logger.info("✅ Inline migration completed successfully.")
+                    
+                finally:
+                    # Release lock
+                    fcntl.flock(lock_fd.fileno(), fcntl.LOCK_UN)
+                    lock_fd.close()
+                    try:
+                        lock_file.unlink()
+                    except:
+                        pass
             
         except Exception as e:
             logger.error(f"❌ Migration failed: {e}")
