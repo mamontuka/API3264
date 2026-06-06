@@ -44,7 +44,7 @@ send_request() {
     local chat_id=$1
     local message=$2
     local test_name=$3
-    
+
     echo "------------------------------------------------------------"
     echo "ТЕСТ: $test_name"
     echo "------------------------------------------------------------"
@@ -53,7 +53,7 @@ send_request() {
     echo ""
     echo "Отправка запроса..."
     echo ""
-    
+
     # Отправляем запрос и сохраняем ответ
     response=$(curl -s -X POST "$API_URL" \
         -H "Content-Type: application/json" \
@@ -67,14 +67,14 @@ send_request() {
         }" \
         -w "\n%{http_code}" \
         --max-time 30)
-    
+
     # Разделяем тело ответа и HTTP код
     http_code=$(echo "$response" | tail -n1)
     body=$(echo "$response" | sed '$d')
-    
+
     echo "HTTP Status: $http_code"
     echo ""
-    
+
     if [ "$http_code" = "200" ]; then
         echo "✅ Успешный ответ!"
         echo ""
@@ -82,19 +82,19 @@ send_request() {
         echo "$body" | head -c 500
         echo ""
         echo ""
-        
+
         # Пытаемся извлечь chatId из ответа (если есть)
         response_chat_id=$(echo "$body" | grep -o '"chatId":"[^"]*"' | head -1 | cut -d'"' -f4)
         if [ ! -z "$response_chat_id" ]; then
             echo "chatId из ответа: $response_chat_id"
         fi
-        
+
         # Пытаемся извлечь parentId из ответа
         response_parent_id=$(echo "$body" | grep -o '"parentId":"[^"]*"' | head -1 | cut -d'"' -f4)
         if [ ! -z "$response_parent_id" ]; then
             echo "parentId из ответа: $response_parent_id"
         fi
-        
+
     else
         echo "❌ Ошибка!"
         echo ""
@@ -102,7 +102,7 @@ send_request() {
         echo "$body" | head -c 1000
         echo ""
     fi
-    
+
     echo ""
     echo ""
 }

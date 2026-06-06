@@ -69,7 +69,7 @@ class PostgresBackend(ChatStateBackend):
                         PRIMARY KEY (openweb_id, model)
                     )
                 """)
-                
+
                 # 🔧 Wrap index creation in try/except to handle race conditions
                 try:
                     await conn.execute(f"""
@@ -86,7 +86,7 @@ class PostgresBackend(ChatStateBackend):
                         logger.debug(f"⚡ Index idx_{self.table}_updated already exists (race, safe)")
                     else:
                         raise
-            
+
             return True
         except Exception as e:
             logger.error(f"PostgresBackend init error: {e}")
@@ -112,7 +112,7 @@ class PostgresBackend(ChatStateBackend):
             async with pool.acquire() as conn:
                 # ✅ Normalize the model before querying
                 norm_model = self._normalize_model(model)
-                
+
                 # Trying to find a record with a normalized model
                 row = await conn.fetchrow(
                     f"""
@@ -122,7 +122,7 @@ class PostgresBackend(ChatStateBackend):
                     openweb_id,
                     norm_model
                 )
-                
+
                 if row:
                     # Return the model as is (maybe None for legacy)
                     return ChatStateData(
@@ -132,7 +132,7 @@ class PostgresBackend(ChatStateBackend):
                         created_at=row["created_at"] or 0.0,
                         model=row["model"] if row["model"] else model
                     )
-                
+
                 # Fallback: If the model was specified but not found, we look for the legacy record (model IS NULL)
                 if model:
                     fallback = await conn.fetchrow(
@@ -151,7 +151,7 @@ class PostgresBackend(ChatStateBackend):
                             created_at=fallback["created_at"] or 0.0,
                             model=None
                         )
-                
+
                 return None
         except Exception as e:
             logger.error(f"PostgresBackend.get error: {e}")

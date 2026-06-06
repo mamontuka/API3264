@@ -46,7 +46,7 @@ logger = logging.getLogger(__name__)
 
 class SeleniumBridge:
     """Manager for downloading files via browser using Playwright."""
-    
+
     def __init__(self, page: Page):
         self.page = page
         self.temp_files: list[Path] = []
@@ -54,18 +54,18 @@ class SeleniumBridge:
     async def save_base64_to_temp(self, base64_data: str, prefix: str = "img") -> Path:
         """
         Saves base64 data to a temporary file.
-        
+
         Args:
             base64_data: Base64 string (with or without data:image/... prefix)
             prefix: File name prefix
-            
+
         Returns:
             Path: Path to the created temporary file
         """
         try:
             # Parsing base64 with a possible prefix
             header, encoded = base64_data.split(",", 1) if "," in base64_data else ("", base64_data)
-            
+
             # Determine the extension by MIME type
             ext = ".png"
             if "jpeg" in header or "jpg" in header:
@@ -74,18 +74,18 @@ class SeleniumBridge:
                 ext = ".gif"
             elif "webp" in header:
                 ext = ".webp"
-            
+
             filename = f"{prefix}_{uuid.uuid4().hex}{ext}"
             filepath = Config.TEMP_FILES_DIR / filename
-            
+
             # Decode and save
             with open(filepath, "wb") as f:
                 f.write(base64.b64decode(encoded))
-            
+
             self.temp_files.append(filepath)
             logger.debug(f"💾 Saved temp file: {filepath}")
             return filepath
-            
+
         except Exception as e:
             logger.error(f"❌ Failed to save base64: {e}")
             raise
@@ -117,11 +117,11 @@ class SeleniumBridge:
                         logger.debug(f"✅ Model switched to {target_model}")
                     except Exception as e:
                         logger.warning(f"⚠️ Failed to switch model to {target_model}: {e}")
-            
+
             # 🔥 Count existing images BEFORE sending
             existing_images = await self.page.locator("img[src*='cdn.qwenlm.ai']").count()
             logger.debug(f"📊 Existing images before upload: {existing_images}")
-            
+
             # 1. Read the file and convert it to base64
             with open(filepath, "rb") as f:
                 file_data = f.read()
@@ -238,7 +238,7 @@ class SeleniumBridge:
                                 response_found = True
                                 break
                     except Exception: continue
-                
+
                 if response_found: break
 
                 try:
@@ -263,7 +263,7 @@ class SeleniumBridge:
             if result_text:
                 await asyncio.sleep(2.0)
                 logger.info(f"✅ Received response ({len(result_text)} chars)")
-            
+
             # 🔥 Returning the dictionary: text + CDN link (if available)
             return {"text": result_text, "image_url": new_image_url}
 

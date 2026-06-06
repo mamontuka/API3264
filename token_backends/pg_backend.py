@@ -110,7 +110,7 @@ class PgTokenBackend(TokenBackend):
                         last_used_at TIMESTAMPTZ DEFAULT NOW()
                     )
                 """)
-                
+
                 # 🔧 Wrap index creation in try/except to handle race conditions
                 try:
                     cur.execute(f"""
@@ -131,7 +131,7 @@ class PgTokenBackend(TokenBackend):
                         conn.rollback()
                     else:
                         raise
-                
+
             conn.commit()
         except Exception as e:
             conn.rollback()

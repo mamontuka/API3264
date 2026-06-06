@@ -302,7 +302,7 @@ async def handle_chat_completions(request: Request, body: Dict[str, Any]):
     message_content = _normalize_message_content(user_msg_obj.get("content", ""))
     files = user_msg_obj.get("files") if isinstance(user_msg_obj.get("files"), list) else body.get("files") or []
     images = user_msg_obj.get("images") if isinstance(user_msg_obj.get("images"), list) else []
-    
+
     # 🔥 ADDITIONAL CHECK: Search for images inside content (OpenWebUI multimodal format)
     raw_content = user_msg_obj.get("content", "")
     multimodal_images = []
@@ -312,7 +312,7 @@ async def handle_chat_completions(request: Request, body: Dict[str, Any]):
                 img_url = item.get("image_url", {}).get("url", "")
                 if img_url:
                     multimodal_images.append(img_url)
-    
+
     # =================================================================
     # 🔥 SELENIUM BRIDGE: Vision handling with ISOLATED STATE
     # =================================================================
@@ -350,7 +350,7 @@ async def handle_chat_completions(request: Request, body: Dict[str, Any]):
             # when OWUI varies the model field or user switches text models.
 #            VISION_MODEL = getattr(Config, 'VISION_MODEL', 'qwen3.7-plus')
 #            vision_model_key = f"{VISION_MODEL}:vision"
-            
+
             logger.debug(f"🔍 Vision state lookup: openweb={openweb_chat_id[:8]}, key={vision_model_key}")            
 
             # Getting states backend
@@ -455,12 +455,12 @@ async def handle_chat_completions(request: Request, body: Dict[str, Any]):
 
                     response_text = bridge_result.get("text", "")
                     extracted_image_url = bridge_result.get("image_url")
-                    
+
                     logger.info(f"✅ Vision Bridge returned {len(response_text)} chars")
                     if extracted_image_url:
                         logger.info(f"🖼️ CDN image URL extracted: {extracted_image_url}")
                         # 🔥 Embed the CDN link in the response via Markdown (OpenWebUI will render it automatically)
-                        img_md = f"\n\n![Edited Image]({extracted_image_url})"
+                        img_md = f"\n\n![]({extracted_image_url})"
                         response_text = (response_text + img_md) if response_text.strip() else img_md.strip()
 
                     # 🔥 Protection against empty answers
@@ -482,7 +482,7 @@ async def handle_chat_completions(request: Request, body: Dict[str, Any]):
                             await _cleanup_empty_chats()
                         except Exception as e:
                             logger.debug(f"Delayed cleanup skipped or failed: {e}")
-                    
+
                     asyncio.create_task(delayed_vision_cleanup())
 
                     # Return the response (streaming or json)
@@ -494,7 +494,7 @@ async def handle_chat_completions(request: Request, body: Dict[str, Any]):
                                 # 🔥 We split a long response into chunks of ~100 characters each
                                 CHUNK_SIZE = 100
                                 text = response_text
-                                
+
                                 # We send the text in parts
                                 for i in range(0, len(text), CHUNK_SIZE):
                                     chunk = text[i:i + CHUNK_SIZE]
@@ -505,10 +505,10 @@ async def handle_chat_completions(request: Request, body: Dict[str, Any]):
                                         "model": model,
                                         "choices": [{"index": 0, "delta": {"content": chunk}, "finish_reason": None}]
                                     }, ensure_ascii=False) + "\n\n"
-                                    
+
                                     # Micro-delay between chunks (simulated streaming)
                                     await asyncio.sleep(0.2)
-                                
+
                                 # Final chunk with finish_reason
                                 yield "data: " + json.dumps({
                                     "id": f"chatcmpl-{qwen_chat_id}",
@@ -522,7 +522,7 @@ async def handle_chat_completions(request: Request, body: Dict[str, Any]):
                                 logger.debug(f"📡 Vision stream completed successfully ({len(text)} chars in {(len(text) + CHUNK_SIZE - 1) // CHUNK_SIZE} chunks)")
                             except Exception as e:
                                 logger.error(f"❌ Vision stream error: {e}", exc_info=True)
-                                
+
                                 # Sending the error as text
                                 yield "data: " + json.dumps({
                                     "id": f"chatcmpl-{qwen_chat_id}",
@@ -582,7 +582,7 @@ async def handle_chat_completions(request: Request, body: Dict[str, Any]):
     # =================================================================
     # STANDARD TEXT PROCESSING (no media)
     # =================================================================
-    
+
     # Debug logging (only if enabled in Config)
     if Config.DEBUG_LOGGING:
         logger.debug(f"🔍 RAW BODY KEYS: {list(body.keys())}")
@@ -716,4 +716,3 @@ async def handle_chat_completions(request: Request, body: Dict[str, Any]):
     # Build and return OpenAI-compatible response
     response_parent_id = response_id or incoming_parent_id
     return _build_openai_completion(result.get("content", ""), model, qwen_chat_id, response_parent_id, usage=result.get("usage"))
-    

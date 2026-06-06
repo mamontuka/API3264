@@ -262,7 +262,7 @@ async def update_chat_parent_id(openweb_chat_id: str, new_parent_id: str, model:
         openweb_chat_id: OpenWebUI chat identifier
         new_parent_id: Response ID from Qwen API to use as parent for next message
         model: Optional model name for analytics/future routing logic (backward compatible)
-    
+
     Side effects:
         - Updates state via backend
         - Logs update operation
@@ -275,5 +275,5 @@ async def update_chat_parent_id(openweb_chat_id: str, new_parent_id: str, model:
         # - logic for saving the model to chat metadata
         # - model usage analytics
         # - prefix caching for different models
-        
+
     logger.debug(f"✅ Updated: last_parent_id[{openweb_chat_id[:8]}...] = {new_parent_id[:8]}... (model={model})")

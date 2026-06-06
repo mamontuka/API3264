@@ -56,16 +56,16 @@ async def _create_backend(mode: TokenBackendType) -> Optional[TokenBackend]:
 async def init_token_storage() -> TokenBackend:
     global _backend, _fallback_active
     if _backend: return _backend
-    
+
     target = Config.TOKEN_STORAGE_BACKEND
     backend = await _create_backend(target)
-    
+
     if backend:
         _backend = backend
         _fallback_active = False
         logger.info(f"✅ TokenStorage backend initialized: {target.value}")
         return _backend
-    
+
     if target == TokenBackendType.POSTGRES:
         logger.warning("⚠️ Token PostgreSQL unavailable, fallback to file...")
         fb = await _create_backend(TokenBackendType.FILE)
@@ -74,7 +74,7 @@ async def init_token_storage() -> TokenBackend:
             _fallback_active = True
             logger.warning("✅ TokenStorage works in fallback file mode.")
             return _backend
-            
+
     raise RuntimeError("Failed to initialize any token backend.")
 
 async def close_token_storage():

@@ -223,7 +223,7 @@ async def _ensure_chat_state_schema(conn, table_name: str) -> bool:
     Ensures the chat_state table has the correct schema with composite key.
     Handles migration from legacy schema (openweb_id PRIMARY KEY) to new schema
     (openweb_id, model) PRIMARY KEY.
-    
+
     Returns True if schema is ready, False on error.
     """
     try:
@@ -232,17 +232,17 @@ async def _ensure_chat_state_schema(conn, table_name: str) -> bool:
             "SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = $1",
             table_name
         )
-        
+
         if not table_exists:
             # Table doesn't exist - will be created later by CREATE TABLE IF NOT EXISTS
             return True
-        
+
         # 🔧 Step 1: Add 'model' column if missing (with DEFAULT '' to avoid NULL issues)
         column_exists = await conn.fetchval(
             "SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = $1 AND column_name = 'model'",
             table_name
         )
-        
+
         if not column_exists:
             logger.info(f"🔧 Adding 'model' column to table '{table_name}' with DEFAULT ''...")
             # Add column with DEFAULT '' so new rows get empty string, not NULL
@@ -251,7 +251,7 @@ async def _ensure_chat_state_schema(conn, table_name: str) -> bool:
             # Column exists - ensure existing NULL values are normalized to ''
             logger.info(f"🔧 Normalizing NULL values in 'model' column for '{table_name}'...")
             await conn.execute(f"UPDATE {table_name} SET model = '' WHERE model IS NULL")
-        
+
         # 🔧 Step 2: Check and migrate primary key
         pk_info = await conn.fetchrow(
             f"""
@@ -266,24 +266,24 @@ async def _ensure_chat_state_schema(conn, table_name: str) -> bool:
             """,
             table_name
         )
-        
+
         if pk_info and pk_info['pk_columns']:
             current_pk = pk_info['pk_columns']
             constraint_name = pk_info['constraint_name']
-            
+
             # If PK is only 'openweb_id', we need to migrate to composite key
             if current_pk == 'openweb_id':
                 logger.info(f"🔧 Migrating primary key on '{table_name}' from ({current_pk}) to (openweb_id, model)...")
-                
+
                 # Drop old primary key constraint
                 await conn.execute(f"ALTER TABLE {table_name} DROP CONSTRAINT {constraint_name}")
-                
+
                 # ✅ CRITICAL: Ensure no NULL values exist before creating composite PK
                 await conn.execute(f"UPDATE {table_name} SET model = '' WHERE model IS NULL")
-                
+
                 # Create new composite primary key
                 await conn.execute(f"ALTER TABLE {table_name} ADD PRIMARY KEY (openweb_id, model)")
-                
+
                 logger.info(f"✅ Primary key migration complete for '{table_name}'")
             elif current_pk == 'openweb_id,model':
                 logger.info(f"✅ Table '{table_name}' already has correct composite primary key")
@@ -296,9 +296,9 @@ async def _ensure_chat_state_schema(conn, table_name: str) -> bool:
             await conn.execute(f"UPDATE {table_name} SET model = '' WHERE model IS NULL")
             await conn.execute(f"ALTER TABLE {table_name} ADD PRIMARY KEY (openweb_id, model)")
             logger.info(f"✅ Primary key added to '{table_name}'")
-        
+
         return True
-        
+
     except Exception as e:
         logger.error(f"❌ Schema migration failed for '{table_name}': {e}")
         return False
@@ -319,7 +319,7 @@ async def migrate_chat_state(target: MigrationTarget, socket_dir: Optional[str])
         if not await _ensure_chat_state_schema(conn, target.db_table):
             logger.error(f"❌ Failed to prepare schema for '{target.db_table}'")
             return 0
-        
+
         # Create table if it doesn't exist (now with correct schema)
         logger.info(f"📋 Ensuring table '{target.db_table}' exists with correct schema...")
         await conn.execute(f"""

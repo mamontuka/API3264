@@ -47,9 +47,9 @@ test_non_stream() {
     echo -e "${YELLOW}ТЕСТ 1: Нестриминговый ответ (stream: false)${NC}"
     echo -e "${YELLOW}────────────────────────────────────────────────────${NC}"
     echo ""
-    
+
     local start_time=$(date +%s%N)
-    
+
     response=$(curl -s -w "\n%{http_code}\n%{time_total}" -X POST "$API_URL" \
         -H "Content-Type: application/json" \
         -d "{
@@ -59,25 +59,25 @@ test_non_stream() {
             \"stream\": false
         }" \
         --max-time 30)
-    
+
     local end_time=$(date +%s%N)
     local duration=$(( (end_time - start_time) / 1000000 ))
-    
+
     local http_code=$(echo "$response" | tail -n2 | head -n1)
     local total_time=$(echo "$response" | tail -n1)
     local body=$(echo "$response" | sed '$d' | sed '$d')
-    
+
     echo -e "⏱  Время выполнения: ${GREEN}${duration}мс${NC} (curl: ${total_time}с)"
     echo -e "📡 HTTP Status: $([ "$http_code" = "200" ] && echo -e "${GREEN}$http_code✅${NC}" || echo -e "${RED}$http_code❌${NC}")"
     echo ""
-    
+
     if [ "$http_code" = "200" ]; then
         # Извлекаем content из ответа
         content=$(echo "$body" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('choices',[{}])[0].get('message',{}).get('content',''))" 2>/dev/null)
         echo -e "📝 Ответ модели:${NC}"
         echo -e "   ${GREEN}$content${NC}"
         echo ""
-        
+
         # Проверяем заголовки ответа
         echo -e "🔍 Проверка заголовков ответа:"
         curl -s -I -X POST "$API_URL" \
@@ -99,18 +99,18 @@ test_stream() {
     echo -e "${YELLOW}ТЕСТ 2: Стриминговый ответ (stream: true)${NC}"
     echo -e "${YELLOW}────────────────────────────────────────────────────${NC}"
     echo ""
-    
+
     local output_file="/tmp/stream_test_$(date +%s).log"
     local chunks_received=0
     local first_chunk_time=""
     local last_chunk_time=""
-    
+
     echo -e "📡 Отправка запроса с stream: true..."
     echo -e "📁 Лог сырых данных: ${BLUE}$output_file${NC}"
     echo ""
     echo -e "${GREEN}Получаем чанки (каждый '.' = один чанк):${NC}"
     echo -n "   "
-    
+
     # Запускаем curl в фоне, читаем построчно
     curl -s -N -X POST "$API_URL" \
         -H "Content-Type: application/json" \
@@ -128,24 +128,24 @@ test_stream() {
         if [[ "$line" =~ ^data:\ * ]]; then
             data="${line#data: }"
             data="${data#"${data%%[![:space:]]*}"}"  # trim left
-            
+
             if [ "$data" = "[DONE]" ]; then
                 echo -e "\n   ${BLUE}[DONE]${NC}"
                 break
             fi
-            
+
             if [ -n "$data" ] && [ "$data" != "" ]; then
                 # Печатаем индикатор получения чанка
                 echo -n "."
-                
+
                 # Засекаем время первого и последнего чанка
                 if [ -z "$first_chunk_time" ]; then
                     first_chunk_time=$(date +%s%N)
                 fi
                 last_chunk_time=$(date +%s%N)
-                
+
                 chunks_received=$((chunks_received + 1))
-                
+
                 # Извлекаем и печатаем контент чанка (если есть)
                 content=$(echo "$data" | python3 -c "import sys,json; d=json.load(sys.stdin); c=d.get('choices',[{}])[0].get('delta',{}).get('content',''); print(c,end='')" 2>/dev/null)
                 if [ -n "$content" ]; then
@@ -154,17 +154,17 @@ test_stream() {
             fi
         fi
     done
-    
+
     echo ""
     echo ""
-    
+
     # Анализируем результаты
     local http_code=$(tail -n2 "$output_file" | head -n1)
     local total_time=$(tail -n1 "$output_file")
-    
+
     echo -e "📊 Статистика стриминга:"
     echo -e "   📦 Чанков получено: ${GREEN}$chunks_received${NC}"
-    
+
     if [ -n "$first_chunk_time" ] && [ -n "$last_chunk_time" ]; then
         local stream_duration=$(( (last_chunk_time - first_chunk_time) / 1000000 ))
         echo -e "   ⏱  Длительность стрима: ${GREEN}${stream_duration}мс${NC}"
@@ -173,11 +173,11 @@ test_stream() {
             echo -e "   🔄 Средний интервал между чанками: ${GREEN}${avg_interval}мс${NC}"
         fi
     fi
-    
+
     echo -e "   📡 HTTP Status: $([ "$http_code" = "200" ] && echo -e "${GREEN}$http_code✅${NC}" || echo -e "${RED}$http_code❌${NC}")"
     echo -e "   🌐 Общее время: ${total_time}с"
     echo ""
-    
+
     # Проверка заголовков для стриминга
     echo -e "🔍 Проверка заголовков (стриминг):"
     curl -s -I -X POST "$API_URL" \
@@ -186,7 +186,7 @@ test_stream() {
         -d "{\"model\":\"$MODEL\",\"messages\":[{\"role\":\"user\",\"content\":\"test\"}],\"chatId\":\"$TEST_CHAT_ID-hdr2\",\"stream\":true}" \
         --max-time 10 2>/dev/null | grep -iE "(content-type|cache-control|transfer-encoding|connection|x-accel)" | sed 's/^/   /'
     echo ""
-    
+
     # Проверка формата ответа
     echo -e "🔍 Анализ формата ответа:"
     local content_type=$(curl -s -I -X POST "$API_URL" \
@@ -194,7 +194,7 @@ test_stream() {
         -H "Accept: text/event-stream" \
         -d "{\"model\":\"$MODEL\",\"messages\":[{\"role\":\"user\",\"content\":\"test\"}],\"chatId\":\"$TEST_CHAT_ID-ct\",\"stream\":true}" \
         --max-time 10 2>/dev/null | grep -i "^content-type:" | head -1)
-    
+
     if echo "$content_type" | grep -qi "text/event-stream"; then
         echo -e "   ✅ Content-Type корректный: ${GREEN}$content_type${NC}"
     elif echo "$content_type" | grep -qi "application/json"; then
@@ -204,7 +204,7 @@ test_stream() {
         echo -e "   ❌ Неожиданный Content-Type: ${RED}$content_type${NC}"
     fi
     echo ""
-    
+
     # Показываем первые и последние чанки для отладки
     echo -e "🔍 Примеры чанков (первые 3):"
     grep "^data:" "$output_file" | head -3 | while read -r line; do
@@ -214,7 +214,7 @@ test_stream() {
         fi
     done
     echo ""
-    
+
     echo -e "🔍 Примеры чанков (последние 3):"
     grep "^data:" "$output_file" | tail -3 | while read -r line; do
         data="${line#data: }"
@@ -223,7 +223,7 @@ test_stream() {
         fi
     done
     echo ""
-    
+
     # Очистка
     rm -f "$output_file"
 }
@@ -236,10 +236,10 @@ test_stream_short() {
     echo -e "${YELLOW}ТЕСТ 3: Стриминг короткого ответа (1-2 слова)${NC}"
     echo -e "${YELLOW}────────────────────────────────────────────────────${NC}"
     echo ""
-    
+
     echo -e "📡 Отправка запроса с очень коротким ожидаемым ответом..."
     echo ""
-    
+
     curl -s -N -X POST "$API_URL" \
         -H "Content-Type: application/json" \
         -H "Accept: text/event-stream" \
@@ -278,7 +278,7 @@ check_proxy_headers() {
     echo -e "${YELLOW}ТЕСТ 4: Проверка заголовков прокси для стриминга${NC}"
     echo -e "${YELLOW}────────────────────────────────────────────────────${NC}"
     echo ""
-    
+
     echo -e "🔍 Заголовки ответа прокси при stream:true:"
     curl -s -i -X POST "$API_URL" \
         -H "Content-Type: application/json" \
@@ -286,7 +286,7 @@ check_proxy_headers() {
         -d "{\"model\":\"$MODEL\",\"messages\":[{\"role\":\"user\",\"content\":\"test\"}],\"chatId\":\"$TEST_CHAT_ID-hdr3\",\"stream\":true}" \
         --max-time 15 2>/dev/null | head -20
     echo ""
-    
+
     echo -e "🔍 Заголовки ответа прокси при stream:false:"
     curl -s -i -X POST "$API_URL" \
         -H "Content-Type: application/json" \

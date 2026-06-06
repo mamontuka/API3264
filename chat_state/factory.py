@@ -126,13 +126,13 @@ def is_fallback_active() -> bool:
 async def get_chat_state(openweb_id: str, model: Optional[str] = None) -> Optional[ChatStateData]:
     """
     Get chat state with model-based isolation support.
-    
+
     Args:
         openweb_id: OpenWebUI chat ID
         model: State isolation model (optional).
                If specified, the composite key openweb_id:model will be used.
                If not specified, the base key is used (backward compatibility).
-    
+
     Returns:
         ChatStateData or None if the state is not found.
     """
@@ -143,7 +143,7 @@ async def get_chat_state(openweb_id: str, model: Optional[str] = None) -> Option
 async def set_chat_state(openweb_id: str, data: ChatStateData, model: Optional[str] = None):
     """
     Save chat state with model isolation support.
-    
+
     Args:
         openweb_id: OpenWebUI chat ID
         data: State data
@@ -156,7 +156,7 @@ async def set_chat_state(openweb_id: str, data: ChatStateData, model: Optional[s
 async def update_chat_parent_id(openweb_id: str, parent_id: str, model: Optional[str] = None):
     """
     Update last_parent_id with model isolation support.
-    
+
     Args:
         openweb_id: OpenWebUI chat ID
         parent_id: New parent_id
@@ -169,7 +169,7 @@ async def update_chat_parent_id(openweb_id: str, parent_id: str, model: Optional
 async def delete_chat_state(openweb_id: str, model: Optional[str] = None):
     """
     Remove chat state with model isolation support.
-    
+
     Args:
         openweb_id: OpenWebUI chat ID
         model: Insulation model (optional)

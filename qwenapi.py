@@ -57,7 +57,7 @@ from contextlib import asynccontextmanager
 import httpx
 import uvicorn
 from fastapi import FastAPI, Request
-from fastapi.responses import StreamingResponse, JSONResponse
+from fastapi.responses import StreamingResponse, JSONResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 
 # Import our configuration module
@@ -80,6 +80,23 @@ from auth.browser import init_browser_singleton, close_shared_browser
 
 # Import token factory
 from token_backends.factory import init_token_storage, close_token_storage, get_token_backend
+
+# TTS Handler Integration
+from handlers.tts_handler import (
+    sanitize_text,
+    is_meaningful_text,
+    get_last_model_gender,
+    detect_language,
+    get_voice_by_gender_lang,
+    get_speed_for_gender_lang,
+    update_voice_cache,
+    get_cached_gender,
+    get_silence_response,
+    generate_speech_async,
+    generate_sse_response,
+    VOICE_CACHE,
+    AUDIO_FORMAT_MIME_TYPES,
+)
 
 _args = None
 
@@ -135,7 +152,7 @@ async def lifespan(app: FastAPI):
             # ============================================================
             lock_file = Config.SESSION_DIR / ".migration.lock"
             lock_fd = open(lock_file, 'w')
-            
+
             try:
                 # Try to acquire lock (non-blocking)
                 fcntl.flock(lock_fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -166,9 +183,9 @@ async def lifespan(app: FastAPI):
                         db_name = db_cfg["db"]
                         db_user = db_cfg["user"]
                         db_pass = db_cfg["pass"]
-                        
+
                         logger.info(f"🔧 Ensuring database '{db_name}' exists for {name}...")
-                        
+
                         # ================================================================
                         # METHOD 1: sudo -u postgres psql (works with peer auth)
                         # ================================================================
@@ -177,16 +194,16 @@ async def lifespan(app: FastAPI):
                             env = os.environ.copy()
                             env["LC_ALL"] = "C"
                             env["LANG"] = "C"
-                            
+
                             check_result = subprocess.run(
                                 ["sudo", "-n", "-u", "postgres", "psql", "-tAc",
                                  f"SELECT 1 FROM pg_database WHERE datname='{db_name}'"],
                                 capture_output=True, text=True, timeout=10, env=env
                             )
-                            
+
                             if check_result.returncode == 0:
                                 db_exists = check_result.stdout.strip() == "1"
-                                
+
                                 if not db_exists:
                                     # Check/create role
                                     role_check = subprocess.run(
@@ -194,7 +211,7 @@ async def lifespan(app: FastAPI):
                                          f"SELECT 1 FROM pg_roles WHERE rolname='{db_user}'"],
                                         capture_output=True, text=True, timeout=10, env=env
                                     )
-                                    
+
                                     if role_check.stdout.strip() != "1":
                                         logger.info(f"➕ Creating role '{db_user}' via sudo psql...")
                                         subprocess.run(
@@ -202,14 +219,14 @@ async def lifespan(app: FastAPI):
                                              f"CREATE ROLE \"{db_user}\" WITH LOGIN PASSWORD '{db_pass}'"],
                                             capture_output=True, text=True, timeout=10, env=env
                                         )
-                                    
+
                                     logger.info(f"➕ Creating database '{db_name}' via sudo psql...")
                                     create_result = subprocess.run(
                                         ["sudo", "-n", "-u", "postgres", "psql", "-c",
                                          f"CREATE DATABASE \"{db_name}\" OWNER \"{db_user}\""],
                                         capture_output=True, text=True, timeout=10, env=env
                                     )
-                                    
+
                                     if create_result.returncode != 0:
                                         # Check if it's a duplicate error (race condition)
                                         if "повторяющееся" in create_result.stderr or "duplicate" in create_result.stderr.lower():
@@ -218,7 +235,7 @@ async def lifespan(app: FastAPI):
                                             logger.error(f"❌ Failed to create database: {create_result.stderr}")
                                     else:
                                         logger.info(f"✅ Database '{db_name}' created successfully")
-                                    
+
                                     # Grant privileges
                                     subprocess.run(
                                         ["sudo", "-n", "-u", "postgres", "psql", "-c",
@@ -227,16 +244,16 @@ async def lifespan(app: FastAPI):
                                     )
                                 else:
                                     logger.debug(f"✅ Database '{db_name}' already exists")
-                                
+
                                 return  # Success, exit function
-                            
+
                         except FileNotFoundError:
                             logger.debug("sudo not found, trying next method...")
                         except subprocess.TimeoutExpired:
                             logger.debug("sudo psql timeout, trying next method...")
                         except Exception as e:
                             logger.debug(f"sudo psql failed: {e}, trying next method...")
-                        
+
                         # ================================================================
                         # METHOD 2: asyncpg via TCP 127.0.0.1 (for md5/scram auth)
                         # ================================================================
@@ -250,7 +267,7 @@ async def lifespan(app: FastAPI):
                                 db_exists = await conn.fetchval(
                                     "SELECT 1 FROM pg_database WHERE datname = $1", db_name
                                 )
-                                
+
                                 if not db_exists:
                                     role_exists = await conn.fetchval(
                                         "SELECT 1 FROM pg_roles WHERE rolname = $1", db_user
@@ -260,14 +277,14 @@ async def lifespan(app: FastAPI):
                                         await conn.execute(
                                             f'CREATE ROLE "{db_user}" WITH LOGIN PASSWORD $1', db_pass
                                         )
-                                    
+
                                     logger.info(f"➕ Creating database '{db_name}' via TCP...")
                                     try:
                                         await conn.execute(f'CREATE DATABASE "{db_name}" OWNER "{db_user}"')
                                         logger.info(f"✅ Database '{db_name}' created")
                                     except asyncpg.exceptions.DuplicateDatabaseError:
                                         logger.debug(f"⚡ Database '{db_name}' already exists (race, safe)")
-                                    
+
                                     await conn.execute(
                                         f'GRANT ALL PRIVILEGES ON DATABASE "{db_name}" TO "{db_user}"'
                                     )
@@ -275,12 +292,12 @@ async def lifespan(app: FastAPI):
                                     logger.debug(f"✅ Database '{db_name}' already exists")
                             finally:
                                 await conn.close()
-                            
+
                             return  # Success
-                        
+
                         except Exception as e:
                             logger.debug(f"TCP 127.0.0.1 failed: {e}")
-                        
+
                         # ================================================================
                         # METHOD 3: asyncpg via socket (if process runs as postgres)
                         # ================================================================
@@ -296,7 +313,7 @@ async def lifespan(app: FastAPI):
                                     db_exists = await conn.fetchval(
                                         "SELECT 1 FROM pg_database WHERE datname = $1", db_name
                                     )
-                                    
+
                                     if not db_exists:
                                         role_exists = await conn.fetchval(
                                             "SELECT 1 FROM pg_roles WHERE rolname = $1", db_user
@@ -305,13 +322,13 @@ async def lifespan(app: FastAPI):
                                             await conn.execute(
                                                 f'CREATE ROLE "{db_user}" WITH LOGIN PASSWORD $1', db_pass
                                             )
-                                        
+
                                         try:
                                             await conn.execute(f'CREATE DATABASE "{db_name}" OWNER "{db_user}"')
                                             logger.info(f"✅ Database '{db_name}' created via socket")
                                         except asyncpg.exceptions.DuplicateDatabaseError:
                                             logger.debug(f"⚡ Database '{db_name}' already exists (race, safe)")
-                                        
+
                                         await conn.execute(
                                             f'GRANT ALL PRIVILEGES ON DATABASE "{db_name}" TO "{db_user}"'
                                         )
@@ -319,12 +336,12 @@ async def lifespan(app: FastAPI):
                                         logger.debug(f"✅ Database '{db_name}' already exists")
                                 finally:
                                     await conn.close()
-                                
+
                                 return  # Success
-                            
+
                             except Exception as e:
                                 logger.debug(f"Socket {socket_dir} failed: {e}")
-                        
+
                         logger.warning(f"⚠️ Could not create database '{db_name}'. Assuming it exists.")
 
                     # ============================================================
@@ -359,13 +376,13 @@ async def lifespan(app: FastAPI):
                                         PRIMARY KEY (openweb_id)
                                     )
                                 """)
-                                
+
                                 # 🔥 CHECK: Is there a 'model' column? If not, add it.
                                 column_exists = await conn.fetchval("""
                                     SELECT 1 FROM information_schema.columns 
                                     WHERE table_schema = 'public' AND table_name = $1 AND column_name = 'model'
                                 """, table)
-                                
+
                                 if not column_exists:
                                     logger.info(f"🔧 Adding 'model' column to {table}...")
                                     try:
@@ -375,7 +392,7 @@ async def lifespan(app: FastAPI):
                                     except Exception as e:
                                         logger.error(f"❌ Failed to add 'model' column: {e}")
                                         raise
-                                
+
                                 # 🔥 CHECK: Do I need to change the PK to a composite one?
                                 pk_info = await conn.fetchrow("""
                                     SELECT string_agg(column_name, ',' ORDER BY ordinal_position) as pk_cols,
@@ -385,7 +402,7 @@ async def lifespan(app: FastAPI):
                                     AND constraint_name LIKE '%_pkey'
                                     GROUP BY constraint_name
                                 """, table)
-                                
+
                                 if pk_info and pk_info['pk_cols'] == 'openweb_id':
                                     logger.info(f"🔧 Migrating PK on {table} to composite (openweb_id, model)...")
                                     try:
@@ -404,7 +421,7 @@ async def lifespan(app: FastAPI):
                                     except Exception as e:
                                         logger.error(f"❌ Failed to migrate PK: {e}")
                                         raise
-                                
+
                                 # 🔧 REMOVED: Index creation - let backend handle it during initialization
                                 # This prevents race conditions between migration and backend init
                             else:
@@ -427,17 +444,17 @@ async def lifespan(app: FastAPI):
                             # 2. Loading and DEBUG format
                             with open(json_file, "r", encoding="utf-8") as f:
                                 data = json.load(f)
-                            
+
                             logger.debug(f"🔍 {name}: JSON type={type(data).__name__}, len={len(data) if hasattr(data, '__len__') else 'N/A'}")
                             if isinstance(data, dict) and data:
                                 first_key, first_val = next(iter(data.items()))
                                 logger.debug(f"🔍 {name}: Sample key='{first_key[:10]}...', val_type={type(first_val).__name__}, val_keys={list(first_val.keys()) if isinstance(first_val, dict) else 'N/A'}")
                             elif isinstance(data, list) and data:
                                 logger.debug(f"🔍 {name}: Sample item keys={list(data[0].keys()) if isinstance(data[0], dict) else 'N/A'}")
-                            
+
                             # 3. Record parsing (universal + debug)
                             records_to_migrate = []
-                            
+
                             if isinstance(data, dict):
                                 for key, val in data.items():
                                     records_to_migrate.append((key, val))
@@ -452,7 +469,7 @@ async def lifespan(app: FastAPI):
                                 return
 
                             logger.info(f"📦 {name}: Parsed {len(records_to_migrate)} potential records")
-                            
+
                             for i, (rid, rval) in enumerate(records_to_migrate[:3]):
                                 logger.debug(f"🔍 {name}[{i}]: id='{rid[:10]}...', type={type(rval).__name__}, content={str(rval)[:200]}")
 
@@ -471,24 +488,24 @@ async def lifespan(app: FastAPI):
                                                 qwen_id = next(iter(record_val.values()), None)
                                             if not qwen_id:
                                                 qwen_id = record_val.get("chat_id")
-                                        
+
                                         if not qwen_id:
                                             skipped += 1
                                             if skipped <= 3:
                                                 logger.warning(f"⚠️ {name}: Skipping {record_id[:10]}... (no qwen_chat_id found, val={record_val})")
                                             continue
-                                            
+
                                         lp_id = None
                                         is_new = False
                                         created = 0.0
                                         model = ""
-                                        
+
                                         if isinstance(record_val, dict):
                                             lp_id = record_val.get("last_parent_id")
                                             is_new = record_val.get("is_new", False)
                                             created = record_val.get("created_at", 0.0)
                                             model = record_val.get("model", "") or ""
-                                        
+
                                         await conn.execute(f"""
                                             INSERT INTO {table} (openweb_id, model, qwen_chat_id, last_parent_id, is_new, created_at, updated_at)
                                             VALUES ($1, $2, $3, $4, $5, $6, NOW())
@@ -496,7 +513,7 @@ async def lifespan(app: FastAPI):
                                                 qwen_chat_id = EXCLUDED.qwen_chat_id, last_parent_id = EXCLUDED.last_parent_id,
                                                 is_new = EXCLUDED.is_new, created_at = EXCLUDED.created_at, updated_at = NOW()
                                         """, record_id, model, qwen_id, lp_id, is_new, created)
-                                    
+
                                     else:
                                         await conn.execute(f"""
                                             INSERT INTO {table} (id, raw_data, created_at, updated_at, last_used_at)
@@ -504,19 +521,19 @@ async def lifespan(app: FastAPI):
                                             ON CONFLICT (id) DO UPDATE SET 
                                                 raw_data = EXCLUDED.raw_data, updated_at = NOW()
                                         """, record_id, json.dumps(record_val, ensure_ascii=False))
-                                    
+
                                     count += 1
                                 except Exception as e:
                                     logger.warning(f"⚠️ {name}: Error processing {record_id}: {e}")
                                     skipped += 1
-                            
+
                             logger.info(f"✅ {name}: {count} migrated, {skipped} skipped.")
 
                         finally:
                             await conn.close()
 
                     # === LAUNCHING MIGRATIONS ===
-                    
+
                     # 1. Chat State
                     await _run_migration_for({
                         "host": Config.CHAT_STATE_DB_HOST, "port": Config.CHAT_STATE_DB_PORT,
@@ -530,7 +547,7 @@ async def lifespan(app: FastAPI):
                     }, Config.SESSION_DIR / "tokens.json", Config.TOKEN_DB_TABLE, "Tokens", is_tokens=True)
 
                     logger.info("✅ Inline migration completed successfully.")
-                    
+
                 finally:
                     # Release lock
                     fcntl.flock(lock_fd.fileno(), fcntl.LOCK_UN)
@@ -539,7 +556,7 @@ async def lifespan(app: FastAPI):
                         lock_file.unlink()
                     except:
                         pass
-            
+
         except Exception as e:
             logger.error(f"❌ Migration failed: {e}")
             logger.warning("⚠️ App starting. Verify DB state if errors persist.")
@@ -548,7 +565,7 @@ async def lifespan(app: FastAPI):
     logger.info("FastAPI startup: initializing backends...")
     await init_chat_state()
     await init_token_storage()
-    
+
     # 🌐 INITIALIZING THE BROWSER
     try:
         await init_browser_singleton()
@@ -642,6 +659,106 @@ async def list_models():
     """Return list of available models in OpenAI-compatible format"""
     models = load_available_models()
     return {"object": "list", "data": [{"id": m, "object": "model", "created": 0, "owned_by": "qwen", "permission": []} for m in models]}
+
+# ===========================================================================
+# TTS ENDPOINTS
+# ===========================================================================
+
+@app.post("/v1/audio/speech")
+@app.post("/audio/speech")
+async def proxy_tts(request: Request):
+    """Unified TTS Proxy Endpoint."""
+
+    # Parse input
+    try:
+        data = await request.json()
+    except Exception:
+        return JSONResponse({"error": "Invalid JSON"}, status_code=400)
+
+    if not data or "input" not in data:
+        return JSONResponse({"error": "Missing 'input'"}, status_code=400)
+
+    raw_text = data.get("input", "")
+    client_key = f"{request.client.host}:{request.headers.get('User-Agent', '')}"
+
+    if Config.DEBUG_LOGGING:
+        logger.debug(f"TTS RAW INPUT: '{raw_text[:100]}...'")
+        logger.debug(f"TTS Headers: {dict(request.headers)}")
+
+    # Sanitization
+    text = sanitize_text(raw_text)
+    logger.debug(f"TTS CLEANED TEXT: '{text}' (len={len(text)})")
+
+    # Silence fallback
+    if not text or not is_meaningful_text(text):
+        logger.warning("TTS: No meaningful text, returning silence")
+        silence_data = await get_silence_response()
+        return Response(content=silence_data, media_type="audio/mpeg", headers={
+            "Content-Type": "audio/mpeg",
+            "Content-Length": str(len(silence_data)),
+            "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+            "Pragma": "no-cache",
+            "Expires": "0",
+        })
+
+    # Voice cache & gender detection
+    current_time = time.time()
+    cached_gender = get_cached_gender(client_key)
+    if cached_gender:
+        gender = cached_gender
+        logger.debug(f"TTS VOICE CACHE HIT: {gender}")
+    else:
+        gender = await get_last_model_gender()
+        update_voice_cache(client_key, gender)
+        logger.debug(f"TTS VOICE CACHE SET: {gender}")
+
+    # Language detection & voice selection
+    lang = detect_language(text)
+    voice_id = get_voice_by_gender_lang(gender, lang)
+    if not voice_id:
+        return JSONResponse({"error": f"No voice for {gender}/{lang}"}, status_code=404)
+
+    # Speed selection
+    speed = get_speed_for_gender_lang(gender, lang, float(data.get("speed", 1.0)))
+    response_format = data.get("response_format", "mp3")
+    stream_format = data.get("stream_format", "audio")
+
+    logger.debug(f"TTS ROUTING: {gender}/{lang} -> {voice_id}, Speed={speed}")
+
+    # SSE Streaming
+    if stream_format == "sse":
+        return StreamingResponse(
+            generate_sse_response(text, voice_id, speed, response_format),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "Connection": "keep-alive"}
+        )
+
+    # Audio generation
+    try:
+        output_path = await generate_speech_async(text, voice_id, response_format, speed)
+        with open(output_path, "rb") as f:
+            audio_data = f.read()
+        os.unlink(output_path)
+
+        mime = AUDIO_FORMAT_MIME_TYPES.get(response_format, "audio/mpeg")
+        return Response(content=audio_data, media_type=mime, headers={
+            "Content-Type": mime,
+            "Content-Length": str(len(audio_data)),
+            "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+            "Pragma": "no-cache",
+            "Expires": "0",
+        })
+    except Exception as e:
+        logger.error(f"TTS generation failed: {e}")
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+@app.get("/v1/models")
+async def list_models():
+    """List available TTS models."""
+    return JSONResponse({
+        "object": "list",
+        "data": [{"id": "tts-voice", "object": "model", "owned_by": "tts-balancer"}]
+    })
 
 # =================================================================
 # CLI MENU & LAUNCHER

@@ -57,19 +57,19 @@ async def _cleanup_empty_chats():
         token_backend = get_token_backend()
         tokens = await token_backend.load_all()
         valid_tokens = [t for t in tokens if not getattr(t, "invalid", False)]
-        
+
         if not valid_tokens:
             logger.warning("⚠️ No valid tokens for cleanup")
             return
-        
+
         token_entry = valid_tokens[0]
         token = getattr(token_entry, "token", None) or (token_entry.get("token") if isinstance(token_entry, dict) else None)
         cookies = getattr(token_entry, "cookies", []) or (token_entry.get("cookies", []) if isinstance(token_entry, dict) else [])
-        
+
         if not token:
             logger.warning("⚠️ No token available for cleanup")
             return
-        
+
         # Forming headers
         headers = {
             "Authorization": f"Bearer {token}",
@@ -80,7 +80,7 @@ async def _cleanup_empty_chats():
         if cookies:
             cookie_str = "; ".join([f"{c['name']}={c['value']}" for c in cookies])
             headers["Cookie"] = cookie_str
-        
+
         # 1. Getting a list of chats with Qwen
         import httpx
         async with httpx.AsyncClient(timeout=30.0) as client:
@@ -89,7 +89,7 @@ async def _cleanup_empty_chats():
                 f"{Config.QWEN_BASE_URL}/api/chats/list",
                 f"{Config.QWEN_BASE_URL}/api/v1/chats",
             ]
-            
+
             chats = []
             for endpoint in list_endpoints:
                 try:
@@ -102,22 +102,22 @@ async def _cleanup_empty_chats():
                             break
                 except Exception:
                     continue
-            
+
             if not chats:
                 logger.warning("⚠️ Could not fetch chat list from Qwen API")
                 return
-            
+
             # 2. Find and delete ONLY chats named "New chat"
             deleted = 0
             skipped = 0
-            
+
             for chat in chats:
                 chat_id = chat.get("id")
                 if not chat_id:
                     continue
-                
+
                 title = chat.get("title", "")
-                
+
                 # We delete ONLY chats with the name "New chat" (case insensitive)
                 if title.lower() != "new chat":
                     skipped += 1
@@ -132,21 +132,21 @@ async def _cleanup_empty_chats():
                     (f"{Config.QWEN_BASE_URL}/api/v2/chats/{chat_id}/delete", "POST"),
                     (f"{Config.QWEN_BASE_URL}/api/chats/{chat_id}", "DELETE"),
                 ]
-                
+
                 success = False
                 for endpoint, method in delete_endpoints:
                     try:
                         logger.debug(f"🔍 Attempting {method}: {endpoint}")
-                        
+
                         if method == "DELETE":
                             resp = await client.delete(endpoint, headers=headers)
                         else:
                             resp = await client.post(endpoint, headers=headers, json={"chat_id": chat_id})
-                        
+
                         # Logging the response body
                         resp_text = resp.text[:500]
                         logger.debug(f"🔍 {method} {endpoint} -> Status: {resp.status_code}, Body: {resp_text}")
-                        
+
                         # We check not only the status, but also the response body.
                         if resp.status_code in (200, 204, 202):
                             try:
@@ -156,7 +156,7 @@ async def _cleanup_empty_chats():
                                     continue
                             except:
                                 pass
-                            
+
                             deleted += 1
                             logger.info(f"✅ Deleted via {method}: {chat_id[:8]}...")
                             success = True
@@ -168,26 +168,26 @@ async def _cleanup_empty_chats():
                     except Exception as e:
                         logger.warning(f"⚠️ Error deleting {chat_id[:8]} via {method} {endpoint}: {e}")
                         continue
-                
+
                 if not success:
                     logger.error(f"❌ Failed to delete chat {chat_id[:8]}... after all attempts")
 
             logger.info(f"✅ Cleanup complete: {deleted} chats named 'New chat' deleted, {skipped} other chats skipped")
-    
+
     except Exception as e:
         logger.error(f"❌ Cleanup failed: {e}", exc_info=True)
 
 
 async def init_browser_singleton():
     global _browser_context, _shared_page
-    
+
     async with _browser_lock:
         if _shared_page is not None:
             return
-        
+
         from playwright.async_api import async_playwright
         p = await async_playwright().start()
-        
+
         # Using stateless launch
         browser = await p.chromium.launch(
             headless=True,
@@ -195,11 +195,11 @@ async def init_browser_singleton():
             args=Config.CHROMIUM_ARGS,
             ignore_default_args=Config.CHROMIUM_IGNORE_DEFAULT_ARGS
         )
-        
+
         _browser_context = await browser.new_context(
             viewport={"width": Config.CHROME_VIEWPORT_WIDTH, "height": Config.CHROME_VIEWPORT_HEIGHT}
         )
-        
+
         # 🔥 We collect the token data
         from token_backends.factory import get_token_backend
         backend = get_token_backend()
@@ -207,11 +207,11 @@ async def init_browser_singleton():
         try:
             # Loading all tokens through the backend
             tokens = await backend.load_all()
-            
+
             # Filter valid ones (TokenData has an invalid field)
             valid_tokens = [t for t in tokens if not getattr(t, "invalid", False)]
             token_entry = valid_tokens[0] if valid_tokens else None
-            
+
             # Fallback to a file if the backend is empty
             if not token_entry:
                 logger.warning("⚠️ No valid tokens in backend, trying file fallback...")
@@ -220,12 +220,12 @@ async def init_browser_singleton():
                 file_tokens = await file_backend.load_all()
                 valid_file_tokens = [t for t in file_tokens if not getattr(t, "invalid", False)]
                 token_entry = valid_file_tokens[0] if valid_file_tokens else None
-            
+
             if token_entry:
                 # 🔥 Inject ALL cookies from the full token object
                 # TokenData can have cookies as list or None
                 cookies = getattr(token_entry, "cookies", []) or []
-                
+
                 # If there are no cookies, but there is a token, we create a basic cookie
                 if not cookies and getattr(token_entry, "token", None):
                     cookies = [{
@@ -236,7 +236,7 @@ async def init_browser_singleton():
                         "httpOnly": True,
                         "secure": True
                     }]
-                
+
                 if cookies:
                     await _browser_context.add_cookies(cookies)
                     logger.info(f"🔑 Full session injected from backend ({len(cookies)} cookies)")
@@ -244,14 +244,14 @@ async def init_browser_singleton():
                     logger.warning("⚠️ No cookies or token found in entry")
             else:
                 logger.error("❌ No valid tokens available in backend or file")
-        
+
         except Exception as e:
             logger.error(f"❌ Failed to load token: {e}")
-        
+
         _shared_page = await _browser_context.new_page()
         # 🔥 DO NOT go to the main page - it creates empty chats
-        logger.info(f"✅ Browser initialized (about:blank)")
-        
+        logger.info(f"✅ Browser initialized")
+
         # 🔥 We are closing empty chats created earlier.We are closing empty chats created earlier.
         await _cleanup_empty_chats()
 
@@ -259,7 +259,7 @@ async def init_browser_singleton():
 async def get_shared_browser_page():
     """
     Returns the general browser page, initializing it if necessary.
-    
+
     Returns:
         Page: Playwright Page Object
     """
@@ -273,7 +273,7 @@ async def close_shared_browser():
     Closes the shared browser instance on shutdown.
     """
     global _browser_context, _shared_page
-    
+
     async with _browser_lock:
         if _shared_page:
             logger.info("🔒 Closing shared browser...")
@@ -282,7 +282,7 @@ async def close_shared_browser():
                 _shared_page = None
             except Exception as e:
                 logger.warning(f"⚠️ Error closing page: {e}")
-        
+
         if _browser_context:
             try:
                 await _browser_context.close()

@@ -114,7 +114,7 @@ class FileBackend(ChatStateBackend):
     async def get(self, openweb_id: str, model: Optional[str] = None) -> Optional[ChatStateData]:
         loop = asyncio.get_event_loop()
         file_path = self._get_file_path(openweb_id, model)
-        
+
         # Try to read file with composite key
         if await loop.run_in_executor(None, file_path.exists):
             try:
@@ -123,7 +123,7 @@ class FileBackend(ChatStateBackend):
                 return ChatStateData.from_dict(data)
             except (json.JSONDecodeError, KeyError):
                 return None
-        
+
         # Fallback: check legacy file without model
         if model:
             legacy_path = self._get_file_path(openweb_id, None)
@@ -134,13 +134,13 @@ class FileBackend(ChatStateBackend):
                     return ChatStateData.from_dict(data)
                 except:
                     pass
-        
+
         return None
 
     async def set(self, openweb_id: str, data: ChatStateData, model: Optional[str] = None):
         effective_model = model or data.model
         file_path = self._get_file_path(openweb_id, effective_model)
-        
+
         async with self._lock:
             self._data[file_path.stem] = data.to_dict()
         await self._save()
@@ -149,7 +149,7 @@ class FileBackend(ChatStateBackend):
         state = await self.get(openweb_id, model)
         if not state:
             return
-        
+
         state.last_parent_id = parent_id
         state.is_new = False
         await self.set(openweb_id, state, model)
@@ -157,7 +157,7 @@ class FileBackend(ChatStateBackend):
     async def delete(self, openweb_id: str, model: Optional[str] = None):
         loop = asyncio.get_event_loop()
         file_path = self._get_file_path(openweb_id, model)
-        
+
         if await loop.run_in_executor(None, file_path.exists):
             await loop.run_in_executor(None, file_path.unlink)
             return True

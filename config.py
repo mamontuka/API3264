@@ -201,9 +201,47 @@ class Config:
     # 🔧 DELAYS CONFIGURATION
     # Delay before updating parent_id after stream ends (seconds)
     PARENT_ID_UPDATE_DELAY = float(os.getenv("PARENT_ID_UPDATE_DELAY", "1.5"))
-    
+
     # Delay in processing tool_calls for synchronization with the API (seconds)
     TOOL_CALL_SYNC_DELAY = float(os.getenv("TOOL_CALL_SYNC_DELAY", "1.5"))
+
+    # =================================================================
+    # TTS CONFIGURATION
+    # =================================================================
+
+    TTS_DEFAULT_GENDER: str = os.getenv("TTS_DEFAULT_GENDER", "female")
+    TTS_KEYWORDS_MALE: List[str] = [k.strip().lower() for k in os.getenv("TTS_KEYWORDS_MALE", "qwen3.5-omni-plus,qwen3.5-flash").split(",") if k.strip()]
+    TTS_VOICE_CACHE_TTL: int = int(os.getenv("TTS_VOICE_CACHE_TTL", "10"))
+    TTS_CHUNK_MAX_LEN: int = int(os.getenv("TTS_CHUNK_MAX_LEN", "400"))
+
+    TTS_SILENCE_FILE_PATH: str = os.getenv("TTS_SILENCE_FILE_PATH", str(SCRIPT_DIR / "silence.mp3"))
+    TTS_SILENCE_MP3_B64: str = os.getenv("TTS_SILENCE_MP3_B64", "")
+
+    TTS_VOICES_CONFIG: str = os.getenv("TTS_VOICES_CONFIG", "")
+    TTS_FALLBACK_VOICES: str = os.getenv("TTS_FALLBACK_VOICES", "")
+
+    TTS_SPEED_FEMALE_EN: float = float(os.getenv("TTS_SPEED_FEMALE_EN", "1.0"))
+    TTS_SPEED_MALE_EN: float = float(os.getenv("TTS_SPEED_MALE_EN", "1.0"))
+    TTS_SPEED_FEMALE_RU: float = float(os.getenv("TTS_SPEED_FEMALE_RU", "1.1"))
+    TTS_SPEED_MALE_RU: float = float(os.getenv("TTS_SPEED_MALE_RU", "1.1"))
+    TTS_SPEED_FEMALE_UA: float = float(os.getenv("TTS_SPEED_FEMALE_UA", "1.1"))
+    TTS_SPEED_MALE_UA: float = float(os.getenv("TTS_SPEED_MALE_UA", "1.1"))
+
+    _TTS_TRASH_WORDS_RAW: str = os.getenv("TTS_TRASH_WORDS", "iframe,src,href,loading,lazy,allowfullscreen,style,class,id,div,span,section,article,header,footer,nav,main,aside,figure,figcaption,position,absolute,top,left,width,height,border,accelerometer,autoplay,clipboard-write,encrypted-media,gyroscope,picture-in-picture,fullscreen,allow")
+    TTS_TRASH_WORDS: List[str] = [w.strip().lower() for w in _TTS_TRASH_WORDS_RAW.split(",") if w.strip()]
+
+    TTS_REMOVE_CSS_VALUES: bool = os.getenv("TTS_REMOVE_CSS_VALUES", "true").lower() in ("true", "1", "yes", "on")
+    TTS_MEANINGFUL_CHECK_LETTERS_ONLY: bool = os.getenv("TTS_MEANINGFUL_CHECK_LETTERS_ONLY", "true").lower() in ("true", "1", "yes", "on")
+
+    # Language detection patterns (regex)
+    TTS_PATTERN_UK: str = os.getenv("TTS_PATTERN_UK", "[ґҐєЄіІїЇ]")
+    TTS_PATTERN_RU: str = os.getenv("TTS_PATTERN_RU", "[а-яА-ЯёЁ]")
+
+    # Explicit language labels mapping (format: label:lang,label:lang)
+    _TTS_LABELS_RAW: str = os.getenv("TTS_LANGUAGE_LABELS", "en:en,english:en,ru:ru,russian:ru,ua:uk,uk:uk,ukrainian:uk")
+    TTS_LANGUAGE_LABELS: Dict[str, str] = dict(
+        item.split(":") for item in _TTS_LABELS_RAW.split(",") if ":" in item
+    )
 
     # ===========================================================================
     # ERROR MESSAGES CONFIGURATION
