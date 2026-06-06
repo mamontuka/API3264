@@ -1,5 +1,3 @@
-# handlers/tts_handler.py
-
 # Copyright (C) 2026
 #
 # Authors:
