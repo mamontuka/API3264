@@ -212,7 +212,7 @@ class Config:
     TTS_DEFAULT_GENDER: str = os.getenv("TTS_DEFAULT_GENDER", "female")
     TTS_KEYWORDS_MALE: List[str] = [k.strip().lower() for k in os.getenv("TTS_KEYWORDS_MALE", "qwen3.5-omni-plus,qwen3.5-flash").split(",") if k.strip()]
     TTS_VOICE_CACHE_TTL: int = int(os.getenv("TTS_VOICE_CACHE_TTL", "10"))
-    TTS_CHUNK_MAX_LEN: int = int(os.getenv("TTS_CHUNK_MAX_LEN", "200"))
+    TTS_CHUNK_MAX_LEN: int = int(os.getenv("TTS_CHUNK_MAX_LEN", "1000"))
 
     TTS_SILENCE_FILE_PATH: str = os.getenv("TTS_SILENCE_FILE_PATH", str(SCRIPT_DIR / "silence.mp3"))
     TTS_SILENCE_MP3_B64: str = os.getenv("TTS_SILENCE_MP3_B64", "")
